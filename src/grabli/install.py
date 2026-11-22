@@ -1,6 +1,6 @@
 """`grabli install`: connect a project to the journal.
 
-Writes the four hooks into the project's `.claude/settings.local.json` and
+Writes the five hooks into the project's `.claude/settings.local.json` and
 registers the MCP server in Claude Code's local scope. Both are private to
 the user, so nothing enters the project's git. Running it again replaces
 grabli's own hooks and leaves everything else in the file alone.
@@ -22,13 +22,15 @@ _MARK = "grabli hook "
 # A hook this command wrote: one plain command ending in `grabli hook <event>`. A compound
 # command that merely contains it belongs to the user and is left alone.
 _OWN = re.compile(
-    r"[^;&|]*\bgrabli hook (session-start|pre-edit|pre-compact|post-compact)( --block)?\s*"
+    r"[^;&|]*\bgrabli hook (session-start|session-end|pre-edit|pre-compact|post-compact)"
+    r"( --block)?\s*"
 )
 _HOOKS: tuple[tuple[str, str, int, str | None], ...] = (
     ("SessionStart", "session-start", 15, None),
     ("PreToolUse", "pre-edit", 15, "Edit|Write|MultiEdit"),
     ("PreCompact", "pre-compact", 15, None),
     ("PostCompact", "post-compact", 30, None),
+    ("SessionEnd", "session-end", 15, None),
 )
 
 
@@ -130,6 +132,15 @@ def hooked_elsewhere(project: Path) -> Path | None:
         except (OSError, UnicodeDecodeError):
             continue
     return None
+
+
+def missing_hooks(path: Path) -> list[str]:
+    """Events of ours that a settings file with grabli's hooks does not run."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [name for _, name, _, _ in _HOOKS if f"{_MARK}{name}" not in text]
 
 
 def tracked_by_git(project: Path, path: Path) -> bool:

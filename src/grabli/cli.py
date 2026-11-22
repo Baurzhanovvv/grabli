@@ -11,8 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import hooks, install
-from .context import repo_root
+from . import hooks, install, status
+from .context import project_root, repo_root
 from .index import Index
 from .models import EntryError, dump
 from .store import MODES, Store, mode
@@ -147,6 +147,29 @@ def _mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _status(args: argparse.Namespace) -> int:
+    store = Store()
+    projects = status.collect(store)
+    if args.forget:
+        _humans_only("status --forget")
+        matches = status.find(projects, args.forget)
+        if not matches:
+            raise EntryError(f"проекта {args.forget!r} в списке нет")
+        if len(matches) > 1:
+            paths = ", ".join(match["path"] for match in matches)
+            raise EntryError(f"под {args.forget!r} подходят несколько, укажи путь: {paths}")
+        store.activity("forget", matches[0]["path"])
+        print(f"Убран из списка: {matches[0]['name']}")
+        return 0
+    if args.project:
+        projects = status.find(projects, args.project)
+        if not projects:
+            print(f"Проекта {args.project!r} в списке нет.", file=sys.stderr)
+            return 1
+    print(status.render(projects, detail=bool(args.project)))
+    return 0
+
+
 def _remove(args: argparse.Namespace) -> int:
     _humans_only("remove")
     target = Store().retract(args.id, reason=args.reason or "removed by human")
@@ -223,11 +246,20 @@ def _install(args: argparse.Namespace) -> int:
     elsewhere = install.hooked_elsewhere(project)
     if elsewhere:
         print(f"Хуки уже подключены в {elsewhere}, второй раз не ставлю.")
+        missing = install.missing_hooks(elsewhere)
+        if missing:
+            print(
+                f"Внимание: в {elsewhere} нет хуков {', '.join(missing)}. Добавь их по образцу "
+                "соседних, иначе эти события не сработают.",
+                file=sys.stderr,
+            )
     else:
         settings = install.write_hooks(project, command, block=args.block)
         print(f"Хуки: {settings}")
         if install.tracked_by_git(project, settings):
             print(f"Внимание: {settings.name} не в .gitignore и попадёт в git.", file=sys.stderr)
+    # Only after the hooks are in place: a failed install must not list the project.
+    Store().activity("install", project_root(project))
     if args.no_mcp:
         return 0
     status = install.add_mcp(project, command)
@@ -275,6 +307,13 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "review", help="разобрать по одному: очередь и записи, сделанные без человека"
     ).set_defaults(run=_review)
+
+    state = commands.add_parser(
+        "status", help="что происходит в подключённых проектах: активность, сейчас, дальше"
+    )
+    state.add_argument("project", nargs="?", help="подробно по одному проекту")
+    state.add_argument("--forget", metavar="PROJECT", help="убрать проект из списка")
+    state.set_defaults(run=_status)
 
     recent = commands.add_parser("recent", help="последние записи журнала")
     recent.add_argument("--limit", type=int, default=10)

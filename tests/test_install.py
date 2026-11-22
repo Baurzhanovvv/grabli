@@ -19,9 +19,15 @@ def commands(settings: dict) -> dict[str, list[str]]:
     }
 
 
-def test_merge_adds_four_hooks_and_quotes_paths_with_spaces():
+def test_merge_adds_the_hooks_and_quotes_paths_with_spaces():
     merged = install.merge_hooks({}, COMMAND)
-    assert set(merged["hooks"]) == {"SessionStart", "PreToolUse", "PreCompact", "PostCompact"}
+    assert set(merged["hooks"]) == {
+        "SessionStart",
+        "SessionEnd",
+        "PreToolUse",
+        "PreCompact",
+        "PostCompact",
+    }
     assert merged["hooks"]["PreToolUse"][0]["matcher"] == "Edit|Write|MultiEdit"
     assert commands(merged)["PreCompact"] == [
         "uv run --directory '/opt/my tools/grabli' grabli hook pre-compact"
@@ -61,7 +67,7 @@ def test_merge_keeps_foreign_content_and_replaces_only_its_own_hooks():
 def test_write_creates_the_file_and_refuses_to_overwrite_broken_json(tmp_path):
     path = install.write_hooks(tmp_path, COMMAND)
     assert path == tmp_path / ".claude" / "settings.local.json"
-    assert len(json.loads(path.read_text(encoding="utf-8"))["hooks"]) == 4
+    assert len(json.loads(path.read_text(encoding="utf-8"))["hooks"]) == 5
     assert [p.name for p in path.parent.iterdir()] == ["settings.local.json"]  # no temp left
 
     path.write_text("{broken", encoding="utf-8")
@@ -221,3 +227,9 @@ def test_launcher_writes_a_full_path_when_installed_as_a_package(tmp_path, monke
     monkeypatch.setattr(install.sys, "argv", [str(tmp_path / "missing")])
     with pytest.raises(install.InstallError, match="cannot find"):
         install.launcher()
+
+
+def test_tests_never_see_the_real_home(tmp_path):
+    from grabli.store import home
+
+    assert home() == tmp_path / "home"

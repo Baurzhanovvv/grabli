@@ -27,6 +27,7 @@ from .context import (
     detect_stack,
     for_file,
     for_session,
+    project_root,
     render,
     repo_root,
 )
@@ -88,8 +89,40 @@ def pre_edit(payload: dict, store: Store, block: bool = False) -> str | None:
     return render(chosen, f"относящиеся к файлу {path.name}. Учти их в этой правке")
 
 
+def session_end(payload: dict, store: Store) -> None:
+    """Nothing to deliver: the event exists for the activity record written in `run`."""
+
+
+def _record_activity(event: str, payload: dict, store: Store) -> None:
+    """One line per hook call for `grabli status`: which project, which session, which file."""
+    file_path = (payload.get("tool_input") or {}).get("file_path")
+    start = Path(file_path) if file_path else Path(payload.get("cwd") or "")
+    if not start.is_absolute():
+        return
+    start = start.resolve()  # one project, one key: no symlinked or `..` spellings of it
+    root = project_root(start)
+    if file_path and not (root / ".git").exists() and payload.get("cwd"):
+        root = project_root(Path(payload["cwd"]).resolve())
+    relative = None
+    if file_path:
+        try:
+            relative = start.relative_to(repo_root(start))
+        except ValueError:
+            relative = Path(Path(file_path).name)
+    store.activity(
+        event,
+        root,
+        session_id=payload.get("session_id"),
+        file=relative.as_posix() if relative else None,
+        source=payload.get("source"),
+        reason=payload.get("reason"),
+        trigger=payload.get("trigger"),
+    )
+
+
 _HANDLERS: dict[str, tuple[str, Callable[..., str | None]]] = {
     "session-start": ("SessionStart", session_start),
+    "session-end": ("SessionEnd", session_end),
     "pre-edit": ("PreToolUse", pre_edit),
     "pre-compact": ("PreCompact", pre_compact),
     "post-compact": ("PostCompact", post_compact),
@@ -122,6 +155,10 @@ def run(
     store = Store()
     try:
         payload = json.load(stdin)
+        try:
+            _record_activity(event, payload, store)
+        except Exception as exc:  # noqa: BLE001 - the status view must never cost a delivery
+            store.log("hook_error", hook=event, error=f"activity: {type(exc).__name__}: {exc}")
         # Without a session id "shown once" cannot be tracked, and blocking would never stop.
         block = block and bool(payload.get("session_id"))
         text = handler(payload, store, block=True) if block else handler(payload, store)

@@ -27,6 +27,11 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.6",
 ]
+eval = [
+    "fastembed>=0.9.1",
+    "numpy>=2.5.5",
+    "pymorphy3>=2.0.6",
+]
 
 [tool.ruff]
 line-length = 100
@@ -36,3 +41,4 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]  # tests import the eval harness in evals/

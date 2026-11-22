@@ -12,7 +12,7 @@ from pathlib import Path
 from .models import Entry, EntryError, Kind, dump, new_id, parse, title_key
 
 _ID_RE = re.compile(r"^[md]-[a-z0-9]{6}$")
-_GITIGNORE = "cache/\nlog.jsonl\n"
+_GITIGNORE = "cache/\nlog.jsonl\nactivity.jsonl\n"
 _SHOWN_EVENTS = {"session_start", "pre_edit"}
 _CONTEXT_LOST = {"compact", "clear"}  # SessionStart sources after which earlier context is gone
 
@@ -75,6 +75,7 @@ class Store:
         self.cache_dir = self.root / "cache"
         self.retracted_dir = self.root / "retracted"
         self.log_path = self.root / "log.jsonl"
+        self.activity_path = self.root / "activity.jsonl"
 
     def _ensure(self) -> None:
         for directory in (self.entries_dir, self.pending_dir, self.cache_dir):
@@ -82,6 +83,17 @@ class Store:
         gitignore = self.root / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text(_GITIGNORE, encoding="utf-8")
+            return
+        # A journal created by an older version: add what it does not ignore yet.
+        try:
+            text = gitignore.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return
+        present = {line.strip() for line in text.splitlines()}
+        missing = [line for line in _GITIGNORE.splitlines() if line not in present]
+        if missing:
+            joint = "" if text.endswith("\n") or not text else "\n"
+            gitignore.write_text(text + joint + "\n".join(missing) + "\n", encoding="utf-8")
 
     def _dir(self, pending: bool) -> Path:
         return self.pending_dir if pending else self.entries_dir
@@ -197,6 +209,22 @@ class Store:
         self._ensure()
         record = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "event": event, **fields}
         with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def activity(self, event: str, root: Path | str, **fields: object) -> None:
+        """Append one project activity event. Read by `grabli status`.
+
+        Kept apart from `log.jsonl`: this file gets a line per edit, and the log is read
+        in full by `shown_ids` on every edit.
+        """
+        self._ensure()
+        record = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "event": event,
+            "root": str(Path(root).resolve()),
+            **{key: value for key, value in fields.items() if value is not None},
+        }
+        with self.activity_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def shown_ids(self, session_id: str) -> set[str]:

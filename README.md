@@ -71,8 +71,18 @@ Memory tools for agents are easy to build and rarely measured. This project
 is built to answer one thing with numbers: **does a mistake journal reduce
 an agent's repeat mistakes?**
 
-The measurements are not done yet. What exists so far are single-run
-observations, and they already changed the design:
+The behavior eval, the one that answers that question, is not run yet.
+
+One measurement is done: retrieval on a real journal (57 entries, 45 labeled
+queries, one run). The shipped SQLite full-text search puts a relevant entry
+in the top 3 for 96% of queries. A small embedding model is clearly worse. A
+2.2 GB one in a hybrid is measurably better, by two queries out of 45, at 70
+times the latency, so it is not shipped. The queries are synthetic and the
+set is small; intervals and limits are in
+[docs/SPEC.md](docs/SPEC.md#12-measurements). It measures the `search` tool,
+not the hooks, which deliver by stack and file path without any search.
+
+Single-run observations that already changed the design:
 
 | Observation (one run each) | Consequence |
 |---|---|
@@ -117,8 +127,9 @@ Or just tell the agent: *"log this mistake in grabli"*.
 | `grabli review` | Walk the entries no human has read: accept, reject, skip |
 | `grabli accept <id>` / `remove <id>` | Mark as reviewed / take out of the journal |
 | `grabli mode [auto\|review]` | Write straight to the journal (default) or through a review queue |
+| `grabli status [project]` | Activity, current work and next steps of every connected project |
 | `grabli search <query>` | Search the journal |
-| `grabli serve` | MCP server with three tools: `search`, `propose`, `retract` |
+| `grabli serve` | MCP server: `search`, `propose`, `retract`, `status` |
 | `grabli hook <event>` | Hook handlers, called by Claude Code |
 
 The journal lives in `~/.grabli` (`GRABLI_HOME` changes that) as plain
@@ -131,8 +142,8 @@ rebuilds itself.
   be deleted at any time.
 - **Two entry kinds, not a knowledge base.** `mistake` and `decision`.
 - **Nothing is deleted.** A removed or retracted entry moves to `retracted/`.
-- **No embeddings yet.** Search is SQLite FTS5 with BM25 and Russian
-  stemming. Embeddings get added if the retrieval eval shows a measurable gain.
+- **No embeddings.** Search is SQLite FTS5 with BM25 and Russian stemming.
+  The retrieval eval did not show a gain worth a 2.2 GB model.
 - **Broken memory never breaks work.** A failing hook exits 0 and logs the error.
 - **Every delivery is logged**, so the evals read what actually happened.
 

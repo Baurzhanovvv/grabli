@@ -8,9 +8,14 @@ from grabli.models import Entry
 from grabli.store import Store
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """No test may touch the real ~/.grabli, whether or not it asks for `store`."""
+    monkeypatch.setenv("GRABLI_HOME", str(tmp_path / "home"))
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch) -> Store:
-    monkeypatch.setenv("GRABLI_HOME", str(tmp_path / "home"))
     # The queue is the opt-in mode; tests of the default (auto) mode live in test_auto.py.
     monkeypatch.setenv("GRABLI_MODE", "review")
     monkeypatch.setattr("grabli.cli._human", lambda: True)  # tests act as a person at a terminal

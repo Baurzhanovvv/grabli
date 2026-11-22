@@ -44,6 +44,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$CLAUDE_PROJECT_DIR\" grabli hook session-end",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }

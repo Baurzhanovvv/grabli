@@ -65,9 +65,10 @@ are meant to be read, edited by hand, and kept in git.
   pending/<id>.md      the review queue (review mode)
   retracted/<id>.md    entries taken out of the journal; kept, never loaded
   mode                 `auto` or `review`; absent means `auto`
+  activity.jsonl       one line per hook call, read by `grabli status`
   cache/index.sqlite   search index, rebuilt from the files
   log.jsonl            append-only event log, read by the evals
-  .gitignore           ignores cache/ and log.jsonl
+  .gitignore           ignores cache/, log.jsonl and activity.jsonl; missing lines are added
 ```
 
 - Files are written atomically (temporary file, then rename).
@@ -224,7 +225,20 @@ Parsing rules:
   compaction is skipped. This covers drafts the human rejected. Duplicates
   are removed before the limit of 3 is applied.
 
-### 7.5 Failure policy
+### 7.5 Hook `session-end` (SessionEnd)
+
+Delivers nothing. It exists so the end of a session is recorded as activity.
+
+### 7.6 Activity record
+
+Every hook call appends one line to `activity.jsonl`: the event, the project
+root, the session id, and for `pre-edit` the edited file relative to the
+repository. A git worktree is attributed to its main checkout. This file is
+separate from `log.jsonl` because it gets a line per edit, and `log.jsonl`
+is read in full on every edit. A failure to record activity never affects
+the delivery.
+
+### 7.7 Failure policy
 
 A failure inside any hook exits 0 and writes a `hook_error` event. Broken
 memory must not stop the agent's work or cancel a compaction. The only
@@ -291,11 +305,44 @@ is searched as is, with a warning, and is never deleted.
 | `grabli mode [auto\|review]` | Show or set the mode. |
 | `grabli pending` / `reject <id>` | Queue operations (review mode). |
 | `grabli search <query> [--kind] [--project] [--stack] [--limit]` | Search the journal. |
+| `grabli status [project] [--forget P]` | What is going on in the connected projects. See 8.5. |
 | `grabli hook <event> [--block]` | Hook handlers; read hook JSON from stdin. |
+
+### 8.5 Status facade
+
+`grabli status [project]` and the MCP tool `status(project?)` show every
+connected project in one place. It is read-only: grabli observes, it starts
+no agents and assigns no work.
+
+A project is listed once `grabli install` has run in it or a hook has fired
+there. For each project:
+
+| Field | Source |
+|---|---|
+| active | A hook fired within the last 15 minutes. |
+| last activity, sessions in 24 h, recently edited files | `activity.jsonl` |
+| now, next | The project's own `.claude/memory/MEMORY.md`, read at display time. `now` is the "Current Status" section, or the first section when there is none; `next` is up to 3 unchecked items of "Next Steps". |
+| lessons | Journal entries whose `project` equals the directory name. |
+
+grabli keeps no copy of a project's status, so there is nothing to drift.
+The price is that "now" and "next" are only as fresh as the project's last
+write to its memory file; the age of that file is always shown. What an
+agent plans inside a running session is not visible.
+
+Text returned by the MCP tool comes from other projects' files and is
+labelled as data, not instructions.
+
+`grabli status --forget <project>` hides a project until a hook fires there
+again. A project is named by its directory name, or by a path
+when two share one.
+
+A project whose last event is a session end is not shown as active. The
+view cannot tell a working agent from one waiting for input. `activity.jsonl`
+is not rotated and is read in full on every call.
 
 ### 8.4 `grabli install`
 
-Writes the four hooks into `.claude/settings.local.json` and registers the
+Writes the five hooks into `.claude/settings.local.json` and registers the
 MCP server in Claude Code's local scope (`claude mcp add -s local`). Both
 are private to the user.
 
@@ -355,16 +402,56 @@ how often the summarizer follows the instructions.
 7. An entry is delivered at most once per context.
 8. A secret-looking value is never echoed back or logged.
 
-## 12. Planned measurements
+## 12. Measurements
 
-Not done yet. No result in this repository should be read as measured
-unless it is listed here with its run count.
+No result in this repository should be read as measured unless it is listed
+here with its run count.
 
-**Eval A, retrieval.** 40 to 50 labeled queries against a real journal.
-Metrics: recall@3 and MRR. Variants: FTS5 as is, embeddings, hybrid,
-stack and path filters. Embeddings are added only if the gain is measurable.
+### 12.1 Eval A, retrieval (run once, 2026-11-22)
 
-**Eval B, behavior.** Tasks with a known trap taken from real past mistakes.
+`uv run --group eval python -m evals.retrieval`. A snapshot of the author's
+real journal, 57 entries from three projects, mostly Russian. 53 queries: 45
+with one to three relevant entries, 8 with none. Intervals are 95% bootstrap
+over queries.
+
+| Engine | hit@3 | MRR@10 | ms/query |
+|---|---|---|---|
+| FTS5 + Snowball stems (shipped) | 0.96 [0.89, 1.00] | 0.89 [0.81, 0.96] | 0.3 |
+| FTS5 + lemmas (pymorphy3) | 0.96 [0.89, 1.00] | 0.91 [0.84, 0.97] | 0.2 |
+| Embeddings, paraphrase-multilingual-MiniLM-L12-v2 | 0.80 [0.69, 0.91] | 0.70 [0.59, 0.80] | 3 |
+| Embeddings, multilingual-e5-large | 0.98 [0.93, 1.00] | 0.96 [0.91, 1.00] | 22 |
+| Hybrid (RRF), shipped + e5-large | 1.00 [1.00, 1.00] | 0.96 [0.91, 1.00] | 21 |
+
+Paired difference in MRR against the shipped engine: lemmas +0.02
+[+0.00, +0.06]; MiniLM −0.19 [−0.29, −0.10]; hybrid with e5-large +0.07
+[+0.03, +0.12], better on 8 queries and worse on none.
+
+Decisions:
+
+- **No embeddings for now.** The only variant with a measurable gain needs a
+  2.2 GB model in every MCP server process and is about 70 times slower, for
+  two more queries out of 45 in the top 3.
+- **No lemmatization.** Its interval touches zero.
+- **A "no answer" threshold is the next change.** On all 8 queries with no
+  relevant entry every engine returned something. The top score separates
+  "has an answer" from "has none" with AUC 0.91 for the shipped engine.
+
+Limits of this run:
+
+- The queries are synthetic. They were written by a separate model that read
+  the entries, was not told how the search works, was forbidden to run it,
+  and for the paraphrase type could not reuse a content word from the title.
+  They are still not what agents actually type; the event log held two real
+  queries when this was run.
+- 45 queries is few: the intervals are wide and the shipped engine is near
+  the ceiling, so this set cannot rank the good variants against each other.
+- 57 entries is a small journal. Lexical search has it easy.
+- The journal and the queries are private and are not in this repository;
+  only the harness and these aggregates are.
+
+### 12.2 Eval B, behavior (not run)
+
+Tasks with a known trap taken from real past mistakes.
 Conditions: no memory, memory on request (MCP only), hooks in context mode,
 hooks in block mode, memory with irrelevant entries, and a journal filled in
 auto mode against one filled through review. Several headless runs

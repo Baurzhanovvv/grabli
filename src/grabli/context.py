@@ -74,6 +74,27 @@ def _scan_dirs(root: Path) -> list[Path]:
     return [root, *children]
 
 
+def project_root(start: Path) -> Path:
+    """Like `repo_root`, but a git worktree is attributed to its main checkout.
+
+    A worktree's `.git` is a file: `gitdir: <main>/.git/worktrees/<name>`.
+    """
+    root = repo_root(start)
+    marker = root / ".git"
+    try:
+        if marker.is_file():
+            pointer = marker.read_text(encoding="utf-8").strip().removeprefix("gitdir:").strip()
+            target = Path(pointer)
+            if not target.is_absolute():  # git 2.48+: worktree.useRelativePaths
+                target = root / target
+            parts = target.resolve().parts
+            if ".git" in parts and "worktrees" in parts[parts.index(".git") :]:
+                return Path(*parts[: parts.index(".git")])
+    except (OSError, UnicodeDecodeError):
+        pass
+    return root
+
+
 def detect_stack(root: Path) -> set[str]:
     stack: set[str] = set()
     if not root.is_dir():
