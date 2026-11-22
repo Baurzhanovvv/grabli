@@ -17,7 +17,7 @@ import snowballstemmer
 from .models import Entry, dump
 from .store import Store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _MAX_TOKENS = 24
 _PREFIX_MIN = 4
 _SNIPPET_CHARS = 180
@@ -27,7 +27,8 @@ _RUSSIAN = snowballstemmer.stemmer("russian")
 _SCHEMA = """
 CREATE TABLE meta (
     id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
-    project TEXT, stack TEXT NOT NULL, superseded INTEGER NOT NULL, body TEXT NOT NULL
+    project TEXT, stack TEXT NOT NULL, superseded INTEGER NOT NULL, body TEXT NOT NULL,
+    reviewed INTEGER NOT NULL
 );
 CREATE VIRTUAL TABLE fts USING fts5(
     id UNINDEXED, title, tags, body, tokenize = 'unicode61 remove_diacritics 2'
@@ -44,6 +45,7 @@ class Hit:
     stack: list[str]
     score: float
     snippet: str
+    reviewed: bool = True  # False: written without a human, see Entry.reviewed
 
     def card(self) -> dict:
         return asdict(self)
@@ -157,7 +159,7 @@ class Index:
 
     def _insert(self, entry: Entry, fingerprint: str) -> None:
         self.db.execute(
-            "INSERT INTO meta VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO meta VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry.id,
                 fingerprint,
@@ -167,6 +169,7 @@ class Index:
                 json.dumps(entry.stack),
                 int(entry.superseded_by is not None),
                 entry.body,
+                int(entry.reviewed),
             ),
         )
         tags = " ".join([entry.kind, entry.project or "", *entry.stack])
@@ -188,7 +191,7 @@ class Index:
         if not terms:
             return []
         sql = (
-            "SELECT m.id, m.kind, m.title, m.project, m.stack, m.body, "
+            "SELECT m.id, m.kind, m.title, m.project, m.stack, m.body, m.reviewed, "
             "bm25(fts, 0.0, 3.0, 2.0, 1.0) AS rank "
             "FROM fts JOIN meta m ON m.id = fts.id WHERE fts MATCH ? AND m.superseded = 0"
         )
@@ -209,9 +212,16 @@ class Index:
         params.append(max(1, limit))
 
         hits: list[Hit] = []
-        for entry_id, entry_kind, title, entry_project, stack_json, body, rank in self.db.execute(
-            sql, params
-        ):
+        for (
+            entry_id,
+            entry_kind,
+            title,
+            entry_project,
+            stack_json,
+            body,
+            reviewed,
+            rank,
+        ) in self.db.execute(sql, params):
             entry_stack = json.loads(stack_json)
             hits.append(
                 Hit(
@@ -222,6 +232,7 @@ class Index:
                     stack=entry_stack,
                     score=-rank,
                     snippet=_snippet(body, terms),
+                    reviewed=bool(reviewed),
                 )
             )
         return hits

@@ -42,6 +42,8 @@ class Entry(BaseModel):
     created: date
     last_verified: date
     superseded_by: str | None = None
+    # False for entries written without a human: by the agent or by compaction capture.
+    reviewed: bool = True
     body: str = Field(min_length=1)
 
     @field_validator("stack")
@@ -101,6 +103,11 @@ def parse(text: str) -> Entry:
     return build({**meta, "body": "\n".join(lines[end + 1 :])})
 
 
+def title_key(title: str) -> str:
+    """Titles that differ only in case, ё/е or spacing are the same entry."""
+    return " ".join(title.lower().replace("ё", "е").split())
+
+
 def build(fields: dict) -> Entry:
     """Validate fields into an Entry. Raises EntryError with field names."""
     try:
@@ -126,6 +133,8 @@ def dump(entry: Entry) -> str:
     for optional in ("project", "source"):
         if meta[optional] is None:
             del meta[optional]
+    if meta["reviewed"]:
+        del meta["reviewed"]  # written only when false; reviewed files stay as they were
     if meta.get("source"):
         meta["source"] = {k: v for k, v in meta["source"].items() if v is not None}
     front = yaml.dump(

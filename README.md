@@ -40,10 +40,10 @@ yours, it gets this entry before it writes the bug again.
 
 ```mermaid
 flowchart LR
-    A[Agent finds a mistake] -->|MCP: propose| Q[(Review queue)]
-    H[You] -->|grabli propose| Q
-    C[Context compaction] -->|lessons from the summary| Q
-    Q -->|grabli review| J[(Journal)]
+    A[Agent finds a mistake] -->|MCP: propose| J[(Journal)]
+    H[You] -->|grabli propose| J
+    C[Context compaction] -->|lessons from the summary| J
+    J -.->|wrong entry: retract| R[(retracted/)]
     J -->|session start: by repo stack| S[Agent, another project]
     J -->|before an edit: by file path| S
     J -->|MCP: search| S
@@ -54,11 +54,16 @@ Three things make it more than a notes folder:
 - **It delivers, the agent does not have to ask.** Hooks match entries
   against the repository's stack at session start and against the file path
   before every edit.
-- **Nothing is written without you.** Every draft, whoever proposed it,
-  waits for `grabli review`. An agent cannot fill its own memory with noise.
+- **The agent keeps its own memory.** A proposal is written to the journal at
+  once, as one atomic file. No queue to babysit. The same lesson proposed
+  twice refreshes the existing entry instead of piling up copies, and the
+  agent can retract an entry that turned out wrong.
+- **You can still tell who wrote what.** Entries written without a human are
+  marked `reviewed: false`, labelled as such when delivered, and listed by
+  `grabli recent`. The agent cannot remove anything you have reviewed.
 - **It catches lessons that would otherwise be lost.** When Claude Code
   compacts the context, grabli asks the summarizer for the session's
-  lessons and queues them as drafts.
+  lessons and saves them.
 
 ## The question
 
@@ -96,7 +101,7 @@ uv run grabli propose "YTD without a reporting period" \
   --body "Summed from January 1. Pass the period explicitly." \
   --stack nestjs --paths '**/reports/**'
 
-uv run grabli review        # accept, reject or skip each draft
+uv run grabli recent        # what the journal holds, and who wrote it
 uv run grabli search "report period"
 ```
 
@@ -107,11 +112,13 @@ Or just tell the agent: *"log this mistake in grabli"*.
 | Command | What it does |
 |---|---|
 | `grabli install [path] [--block] [--no-mcp]` | Connect a project to the journal |
-| `grabli propose <title> [--body ...]` | Queue a draft by hand |
-| `grabli review` | Walk the queue |
-| `grabli pending` / `accept <id>` / `reject <id>` | Queue operations |
+| `grabli propose <title> [--body ...]` | Add an entry by hand |
+| `grabli recent [--unreviewed]` | Latest entries, with who wrote them |
+| `grabli review` | Walk the entries no human has read: accept, reject, skip |
+| `grabli accept <id>` / `remove <id>` | Mark as reviewed / take out of the journal |
+| `grabli mode [auto\|review]` | Write straight to the journal (default) or through a review queue |
 | `grabli search <query>` | Search the journal |
-| `grabli serve` | MCP server with two tools: `search`, `propose` |
+| `grabli serve` | MCP server with three tools: `search`, `propose`, `retract` |
 | `grabli hook <event>` | Hook handlers, called by Claude Code |
 
 The journal lives in `~/.grabli` (`GRABLI_HOME` changes that) as plain
@@ -123,6 +130,7 @@ rebuilds itself.
 - **Files are the source of truth.** The SQLite index and the event log can
   be deleted at any time.
 - **Two entry kinds, not a knowledge base.** `mistake` and `decision`.
+- **Nothing is deleted.** A removed or retracted entry moves to `retracted/`.
 - **No embeddings yet.** Search is SQLite FTS5 with BM25 and Russian
   stemming. Embeddings get added if the retrieval eval shows a measurable gain.
 - **Broken memory never breaks work.** A failing hook exits 0 and logs the error.
@@ -130,6 +138,12 @@ rebuilds itself.
 
 ## Limitations
 
+- **Autonomous memory can be wrong, and can be poisoned.** A bad conclusion,
+  or text injected from a repository the agent read, can end up as an entry
+  delivered to other projects. Entries are framed as reference, not
+  instructions, and unreviewed ones are labelled, but that is mitigation, not
+  prevention. For untrusted code run `grabli mode review`: proposals then
+  wait in a queue for `grabli review`.
 - Search is lexical. A query with no shared word stems finds nothing.
 - The secret check on proposed entries is a list of regular expressions, not a guarantee.
 - Compaction capture depends on the summarizer following instructions.

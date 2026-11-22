@@ -159,9 +159,9 @@ def test_hook_never_fails_the_session_and_records_the_error(store, event):
 # --- MCP tools ------------------------------------------------------------
 
 
-def test_server_exposes_exactly_two_tools(store):
+def test_server_exposes_exactly_three_tools(store):
     tools = asyncio.run(build_server(store).list_tools())
-    assert {tool.name for tool in tools} == {"search", "propose"}
+    assert {tool.name for tool in tools} == {"search", "propose", "retract"}
     assert all(tool.description for tool in tools)
 
 

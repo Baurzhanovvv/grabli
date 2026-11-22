@@ -3,8 +3,8 @@
 The model gets no turn at compaction time, so it cannot call `propose`.
 Instead `pre-compact` asks the summarizer to append a block of lessons to
 the summary (Claude Code uses the hook's stdout as summary instructions),
-and `post-compact` turns that block into pending drafts. Nothing reaches
-the journal without `grabli review`.
+and `post-compact` turns that block into entries: straight into the journal
+in auto mode (marked `reviewed: false`), into the queue in review mode.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from .context import repo_root
+from .models import title_key
 from .store import Store
 
 MAX_LESSONS = 3
@@ -136,8 +137,7 @@ def parse_lessons(summary: str) -> list[dict]:
     return lessons
 
 
-def _key(title: str) -> str:
-    return " ".join(title.lower().replace("ё", "е").split())
+_key = title_key
 
 
 def _seen(store: Store) -> set[str]:
@@ -176,6 +176,7 @@ def post_compact(payload: dict, store: Store) -> None:
     ids: list[str] = []
     titles: list[str] = []
     rejected: list[str] = []
+    duplicates = len(lessons) - len(fresh)
     for lesson in fresh[:MAX_LESSONS]:
         try:
             result = do_propose(
@@ -193,11 +194,13 @@ def post_compact(payload: dict, store: Store) -> None:
         except Exception as exc:  # noqa: BLE001 - one bad lesson must not lose the others
             rejected.append(f"{type(exc).__name__}: {exc}")
             continue
-        if result["status"] == "pending":
+        if result["status"] in ("pending", "saved"):
             ids.append(result["id"])
             titles.append(_key(lesson["title"]))
+        elif result["status"] == "exists":  # proposed by someone else since `_seen` was read
+            duplicates += 1
         else:
-            rejected.append(result["reason"])
+            rejected.append(result.get("reason", result["status"]))
     # Logged even when nothing was found: shows how often the summarizer follows the format.
     store.log(
         "compact_capture",
@@ -207,6 +210,6 @@ def post_compact(payload: dict, store: Store) -> None:
         found=len(lessons),
         ids=ids,
         titles=titles,
-        duplicates=len(lessons) - len(fresh),
+        duplicates=duplicates,
         rejected=rejected,
     )

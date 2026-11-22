@@ -181,7 +181,7 @@ def test_hit_card_has_snippet_from_matching_line(store, make_entry):
     with Index(store) as index:
         card = index.search("календарного")[0].card()
     assert card["snippet"] == "Отчёт суммировал от начала календарного года."
-    assert set(card) == {"id", "kind", "title", "project", "stack", "score", "snippet"}
+    assert set(card) == {"id", "kind", "title", "project", "stack", "score", "snippet", "reviewed"}
     assert card["score"] > 0
 
 

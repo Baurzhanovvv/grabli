@@ -19,14 +19,16 @@ instrument; the measurements (section 12) are the result.
 - Not a secrets vault. Entries must not contain secrets; see section 9.
 - No embeddings or vector search until a measurement shows they pay off.
 - No agent other than Claude Code. The MCP tools work anywhere, the hooks do not.
-- No write path that skips the human. Nothing reaches the journal unreviewed.
+- No silent trust. An entry written without a human is marked as such, in the
+  file and at delivery.
 
 ## 3. Terms
 
 | Term | Meaning |
 |---|---|
-| Entry | One reviewed record in the journal. |
-| Draft | A proposed record waiting in the queue. Invisible to search and hooks. |
+| Entry | One record in the journal. |
+| Draft | A proposed record waiting in the queue (review mode only). Invisible to search and hooks. |
+| Mode | `auto` (default): proposals are written to the journal at once. `review`: they wait in the queue. Stored in the `mode` file in the home directory (`grabli mode review`); the `GRABLI_MODE` variable overrides it. The file is what reaches hooks and the MCP server, which Claude Code starts in its own environment. |
 | Journal | The set of entries: `entries/` under the home directory. |
 | Queue | The set of drafts: `pending/`. |
 | Home | `GRABLI_HOME`, default `~/.grabli`. |
@@ -49,6 +51,7 @@ are rejected.
 | `created` | date | ISO 8601. |
 | `last_verified` | date | Set to today when a draft is accepted. |
 | `superseded_by` | id, optional | A superseded entry is never delivered or found. |
+| `reviewed` | bool, default true | False for an entry written without a human. Serialized only when false. |
 | body | Markdown | At least 1 character after trimming. |
 
 Serialization is deterministic and uses no YAML anchors, because the files
@@ -59,7 +62,9 @@ are meant to be read, edited by hand, and kept in git.
 ```
 ~/.grabli/
   entries/<id>.md      the journal, source of truth
-  pending/<id>.md      the review queue
+  pending/<id>.md      the review queue (review mode)
+  retracted/<id>.md    entries taken out of the journal; kept, never loaded
+  mode                 `auto` or `review`; absent means `auto`
   cache/index.sqlite   search index, rebuilt from the files
   log.jsonl            append-only event log, read by the evals
   .gitignore           ignores cache/ and log.jsonl
@@ -74,11 +79,39 @@ are meant to be read, edited by hand, and kept in git.
 ## 6. Lifecycle
 
 ```
-propose (agent | human | compaction) -> pending/ -> review -> entries/ -> delivery
-                                                      \-> rejected (file deleted)
+auto mode (default):
+  propose (agent | human | compaction) -> entries/ -> delivery
+                                             \-> retract / remove -> retracted/
+
+review mode (`grabli mode review`):
+  propose -> pending/ -> grabli review -> entries/ -> delivery
 ```
 
-There are three ways to create a draft and one way to accept it.
+In auto mode the agent fills its memory on its own. Each write is one atomic
+file rename into `entries/`, so an entry is either fully there or not at all,
+and it persists as a plain file. Entries from the agent or from compaction
+carry `reviewed: false`; an entry typed by the human is reviewed from the start.
+
+A proposal whose kind and title match an active entry (title compared
+ignoring case, `ё`/`е` and spacing) does not create a second entry. The call
+returns `status: exists` with the existing title and the start of its body,
+so the caller can tell a repeat from a different lesson under the same
+name. An unreviewed entry gets today's `last_verified`; the date of an
+entry a human reviewed is not moved by an agent.
+
+`reviewed: true` records a human's decision, so the CLI commands that set
+or undo it (`accept`, `reject`, `remove`, `review`, `mode <value>`) refuse
+to run without a terminal on stdout, and `grabli propose` run without one
+writes an unreviewed entry with `found_by: agent`. An agent calling grabli
+through its shell tool has a pipe there. This is a speed bump against
+accidents, not a security boundary: an agent with a shell can edit the
+files directly.
+
+Human review is optional: `grabli recent` lists what was written,
+`grabli review` walks unreviewed entries, `grabli accept <id>` marks one as
+reviewed, `grabli remove <id>` takes one out.
+
+There are three sources of proposals.
 
 | Source | Entry point | `via` in the log |
 |---|---|---|
@@ -107,6 +140,11 @@ directory. The detector reads the root and its direct children:
 Selects up to 3 active entries sharing at least one stack tag with the repo,
 most overlap first, then most recently verified. Output: hook JSON with
 `additionalContext`. Entry bodies are cut at 700 characters.
+
+Delivered text is framed as reference from past sessions, not instructions,
+and tells the agent not to run commands found in entries. A reviewed entry
+is shown with the date it was verified; an unreviewed one is labelled as
+written by the agent and not checked.
 
 ### 7.3 Hook `pre-edit` (PreToolUse, matcher `Edit|Write|MultiEdit`)
 
@@ -143,8 +181,9 @@ The model gets no turn at compaction time, so it cannot call `propose`.
    </grabli-lessons>
    ```
 
-2. `post-compact` reads `compact_summary`, parses the block, and queues up to
-   3 drafts with `found_by: compact`.
+2. `post-compact` reads `compact_summary`, parses the block, and proposes up to
+   3 entries with `found_by: compact`. In auto mode they go into the journal
+   with `reviewed: false`; in review mode, into the queue.
 
 Parsing rules:
 
@@ -176,16 +215,30 @@ import the MCP SDK; they read the entry files directly to stay fast.
 `search(query?, id?, kind?, project?, stack?, limit=5)`
 
 - With `id`: the full entry.
-- With `query`: cards (`id`, `kind`, `title`, `project`, `stack`, `score`, `snippet`).
+- With `query`: cards (`id`, `kind`, `title`, `project`, `stack`, `score`, `snippet`,
+  `reviewed`).
 - A miss is not an error: `{"found": false, "hint": ...}`.
 - `limit` is clamped to 1..20. Unreadable files are reported in `warnings`.
 
 `propose(kind, title, body, project?, stack?, paths?, repo?, commit?, found_by?)`
 
-- Returns `{"status": "pending", "id", "hint", "similar"?, "warnings"?}` or
-  `{"status": "rejected", "reason"}`.
-- The draft is saved before the search for similar entries, so a busy index
+- Returns `status`: `saved` (auto mode), `exists` (same title, date refreshed),
+  `pending` (review mode) or `rejected` (with `reason`). Also `id`, `hint`,
+  and optionally `similar` and `warnings`.
+- The entry is saved before the search for similar entries, so a busy index
   cannot lose it.
+
+`retract(id, reason, superseded_by?)`
+
+- Takes a wrong or outdated entry out of the journal. `reason` is required
+  and is logged.
+- Without `superseded_by` the file moves to `retracted/`. With it, the entry
+  stays and is marked superseded by an existing, active entry. An entry that
+  is itself superseded cannot be a replacement, so no cycles.
+- Only unreviewed entries. For an entry a human has reviewed the tool
+  refuses and tells the agent to report it to the user. An agent misled by
+  injected text must not be able to empty the reviewed part of the journal.
+- Returns `status`: `retracted`, `superseded`, `refused` or `not_found`.
 
 ### 8.2 Search
 
@@ -205,9 +258,13 @@ is searched as is, with a warning, and is never deleted.
 |---|---|
 | `grabli install [path] [--block] [--no-mcp]` | Connect a project. See 8.4. |
 | `grabli serve` | Run the MCP server. |
-| `grabli propose <title> [--body] [--kind] [--stack] [--paths] ...` | Queue a draft by hand. Body from `--body` or stdin. |
-| `grabli review` | Walk the queue: accept, reject, skip, quit. |
-| `grabli pending` / `accept <id>` / `reject <id>` | Queue operations. |
+| `grabli propose <title> [--body] [--kind] [--stack] [--paths] ...` | Add an entry by hand (reviewed). Body from `--body` or stdin. |
+| `grabli recent [--limit] [--unreviewed]` | Latest journal entries, newest first, with who wrote them. |
+| `grabli review` | Walk the queue and the unreviewed entries: accept, reject, skip, quit. |
+| `grabli accept <id>` | Accept a draft, or mark a journal entry as reviewed. |
+| `grabli remove <id> [--reason]` | Take an entry out of the journal. The file moves to `retracted/`. |
+| `grabli mode [auto\|review]` | Show or set the mode. |
+| `grabli pending` / `reject <id>` | Queue operations (review mode). |
 | `grabli search <query> [--kind] [--project] [--stack] [--limit]` | Search the journal. |
 | `grabli hook <event> [--block]` | Hook handlers; read hook JSON from stdin. |
 
@@ -252,7 +309,9 @@ event-specific fields.
 | `session_start` | `session_id`, `source`, `repo`, `stack`, `ids` |
 | `pre_edit` | `session_id`, `repo`, `file`, `mode`, `ids` |
 | `search` | `query`, `ids` |
-| `propose` | `ids`, `kind`, `via` |
+| `propose` | `ids`, `kind`, `via`, `mode`, `duplicate`? |
+| `accept` / `reject` | `ids` |
+| `retract` | `ids`, `reason`, `via` (`mcp`, `cli`, `review`), `superseded_by`? |
 | `pre_compact` | `session_id`, `trigger` |
 | `compact_capture` | `session_id`, `trigger`, `repo`, `found`, `ids`, `titles`, `duplicates`, `rejected` |
 | `hook_error` | `hook`, `error` |
@@ -262,12 +321,14 @@ how often the summarizer follows the instructions.
 
 ## 11. Invariants
 
-1. Nothing enters `entries/` without a human accepting it.
-2. A draft is never visible to search or hooks.
-3. A hook failure never fails the session.
-4. The files are the source of truth; the index and the log can be deleted.
-5. An entry is delivered at most once per context.
-6. A secret-looking value is never echoed back or logged.
+1. Every entry written without a human carries `reviewed: false` until a human accepts it.
+2. Through the MCP tools an agent cannot remove, supersede or re-date an entry a human has reviewed.
+3. Nothing is deleted: a removed entry moves to `retracted/`.
+4. A draft in the queue is never visible to search or hooks.
+5. A hook failure never fails the session.
+6. The files are the source of truth; the index and the log can be deleted.
+7. An entry is delivered at most once per context.
+8. A secret-looking value is never echoed back or logged.
 
 ## 12. Planned measurements
 
@@ -280,7 +341,8 @@ stack and path filters. Embeddings are added only if the gain is measurable.
 
 **Eval B, behavior.** Tasks with a known trap taken from real past mistakes.
 Conditions: no memory, memory on request (MCP only), hooks in context mode,
-hooks in block mode, memory with irrelevant entries. Several headless runs
+hooks in block mode, memory with irrelevant entries, and a journal filled in
+auto mode against one filled through review. Several headless runs
 per condition, in isolation:
 
 ```
@@ -297,6 +359,18 @@ Observations so far, one run each, not results:
   the requested format and two drafts were queued.
 
 ## 13. Known limitations
+
+- **Auto mode trades review for coverage.** A wrong conclusion written by the
+  agent is delivered to every matching project until someone retracts it.
+- **Memory is an injection surface.** Text from a repository or a web page
+  can talk the agent into writing an "entry" that then reaches future
+  sessions in other projects. The framing at delivery, the `reviewed` flag
+  and the secret scan reduce this; they do not prevent it. `grabli mode review`
+  is the mode for untrusted code.
+- Duplicate detection compares kind and title only. The same lesson under a
+  different title becomes a second entry.
+- The `reviewed` flag is honest only as long as the agent does not write
+  the files itself; see section 6.
 
 - Lexical search: a query with no shared word stems finds nothing. Snowball
   does not handle fleeting vowels, so «ошибка» does not find «ошибок».

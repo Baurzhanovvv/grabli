@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import sqlite3
@@ -14,7 +15,24 @@ from . import hooks, install
 from .context import repo_root
 from .index import Index
 from .models import EntryError, dump
-from .store import Store
+from .store import MODES, Store, mode
+
+
+def _human() -> bool:
+    """A terminal on stdout. An agent running grabli through its shell tool has a pipe there.
+
+    This is a speed bump, not a security boundary: an agent with a shell can also edit the
+    files directly. It keeps an agent from marking entries as human-reviewed by accident.
+    """
+    return sys.stdout.isatty()
+
+
+def _humans_only(action: str) -> None:
+    if not _human():
+        raise EntryError(
+            f"`grabli {action}` works only in a terminal: it records a human's decision. "
+            "An agent should use the MCP tools `propose` and `retract`."
+        )
 
 
 def _warn(messages: list[str]) -> None:
@@ -69,8 +87,9 @@ def _propose(args: argparse.Namespace) -> int:
         paths=args.paths,
         repo=args.repo,
         commit=args.commit,
-        found_by=args.found_by,
+        found_by=args.found_by or ("human" if _human() else "agent"),
         via="cli",
+        reviewed=_human(),  # typed by the human themselves, not piped by an agent
     )
     if result["status"] == "rejected":
         print(f"Отклонено: {result['reason']}", file=sys.stderr)
@@ -82,10 +101,14 @@ def _propose(args: argparse.Namespace) -> int:
             print(f"Набранный текст сохранён: {kept.name}", file=sys.stderr)
         return 1
     _warn(result.get("warnings", []))
-    print(f"Черновик: {result['id']}")
+    if result["status"] == "exists":
+        print(f"Уже есть: {result['id']}, обновил дату. Новая запись не создана.")
+        return 0
+    print(f"{'Черновик' if result['status'] == 'pending' else 'Записано'}: {result['id']}")
     for similar in result.get("similar", []):
         print(f"  похожая запись: {similar['id']}  {similar['title']}")
-    print(f"Принять: grabli accept {result['id']}")
+    if result["status"] == "pending":
+        print(f"Принять: grabli accept {result['id']}")
     return 0
 
 
@@ -99,12 +122,50 @@ def _pending(_: argparse.Namespace) -> int:
     return 0
 
 
-def _review(_: argparse.Namespace) -> int:
-    store = Store()
-    drafts, errors = store.load(pending=True)
+def _recent(args: argparse.Namespace) -> int:
+    entries, errors = Store().load()
     _warn(errors)
+    entries.sort(key=lambda entry: (entry.created, entry.id), reverse=True)
+    if args.unreviewed:
+        entries = [entry for entry in entries if not entry.reviewed]
+    if not entries:
+        print("Записей нет.")
+    for entry in entries[: max(1, args.limit)]:
+        origin = (entry.source.found_by if entry.source else None) or "?"
+        mark = "проверено" if entry.reviewed else "авто"
+        print(f"{entry.id}  {entry.created}  {mark:<9}  {origin:<12}  {entry.title}")
+    return 0
+
+
+def _mode(args: argparse.Namespace) -> int:
+    if args.mode:
+        _humans_only("mode")
+        Store().set_mode(args.mode)
+    print(f"Режим: {mode()}")
+    if os.environ.get("GRABLI_MODE", "").strip().lower() in MODES:
+        print("Задан переменной GRABLI_MODE, она главнее сохранённого.", file=sys.stderr)
+    return 0
+
+
+def _remove(args: argparse.Namespace) -> int:
+    _humans_only("remove")
+    target = Store().retract(args.id, reason=args.reason or "removed by human")
+    print(f"Убрано из журнала: {args.id} (файл сохранён: {target})")
+    return 0
+
+
+def _review(_: argparse.Namespace) -> int:
+    _humans_only("review")
+    store = Store()
+    queued, errors = store.load(pending=True)
+    _warn(errors)
+    written, errors = store.load()
+    _warn(errors)
+    # The queue first, then what was written without a human.
+    drafts = [*queued, *(entry for entry in written if not entry.reviewed)]
+    in_queue = {draft.id for draft in queued}
     if not drafts:
-        print("Очередь пуста.")
+        print("Проверять нечего.")
         return 0
     for number, draft in enumerate(drafts, start=1):
         print(f"\n[{number}/{len(drafts)}]\n{dump(draft)}")
@@ -118,7 +179,10 @@ def _review(_: argparse.Namespace) -> int:
                 store.accept(draft.id)
                 print(f"Принято: {draft.id}")
             elif answer == "r":
-                store.reject(draft.id)
+                if draft.id in in_queue:
+                    store.reject(draft.id)
+                else:
+                    store.retract(draft.id, reason="rejected in review", via="review")
                 print(f"Отклонено: {draft.id}")
             elif answer == "q":
                 return 0
@@ -129,12 +193,14 @@ def _review(_: argparse.Namespace) -> int:
 
 
 def _accept(args: argparse.Namespace) -> int:
+    _humans_only("accept")
     entry = Store().accept(args.id)
     print(f"Принято: {entry.id}  {entry.title}")
     return 0
 
 
 def _reject(args: argparse.Namespace) -> int:
+    _humans_only("reject")
     Store().reject(args.id)
     print(f"Отклонено: {args.id}")
     return 0
@@ -202,14 +268,30 @@ def _parser() -> argparse.ArgumentParser:
     propose.add_argument("--paths", action="append", help="glob-маска файлов; можно повторять")
     propose.add_argument("--repo")
     propose.add_argument("--commit")
-    propose.add_argument("--found-by", dest="found_by", default="human")
+    propose.add_argument("--found-by", dest="found_by")
     propose.set_defaults(run=_propose)
 
     commands.add_parser("pending", help="показать очередь черновиков").set_defaults(run=_pending)
-    commands.add_parser("review", help="разобрать очередь по одному").set_defaults(run=_review)
+    commands.add_parser(
+        "review", help="разобрать по одному: очередь и записи, сделанные без человека"
+    ).set_defaults(run=_review)
+
+    recent = commands.add_parser("recent", help="последние записи журнала")
+    recent.add_argument("--limit", type=int, default=10)
+    recent.add_argument("--unreviewed", action="store_true", help="только записанные без человека")
+    recent.set_defaults(run=_recent)
+
+    switch = commands.add_parser("mode", help="показать или сменить режим записи")
+    switch.add_argument("mode", nargs="?", choices=MODES)
+    switch.set_defaults(run=_mode)
+
+    remove = commands.add_parser("remove", help="убрать запись из журнала (файл сохраняется)")
+    remove.add_argument("id")
+    remove.add_argument("--reason")
+    remove.set_defaults(run=_remove)
 
     for name, handler, text in (
-        ("accept", _accept, "принять черновик в журнал"),
+        ("accept", _accept, "принять черновик или отметить запись проверенной"),
         ("reject", _reject, "удалить черновик"),
     ):
         command = commands.add_parser(name, help=text)

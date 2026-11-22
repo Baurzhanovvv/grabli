@@ -9,7 +9,7 @@ import tempfile
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from .models import Entry, EntryError, Kind, dump, new_id, parse
+from .models import Entry, EntryError, Kind, dump, new_id, parse, title_key
 
 _ID_RE = re.compile(r"^[md]-[a-z0-9]{6}$")
 _GITIGNORE = "cache/\nlog.jsonl\n"
@@ -40,6 +40,24 @@ def home() -> Path:
     return Path(os.environ.get("GRABLI_HOME") or "~/.grabli").expanduser()
 
 
+MODES = ("auto", "review")
+
+
+def mode() -> str:
+    """`auto`: proposals go straight into the journal. `review`: they wait in the queue.
+
+    `GRABLI_MODE` wins; otherwise the `mode` file in the home directory. The file is what
+    reaches hooks and the MCP server, which Claude Code starts in its own environment.
+    """
+    chosen = os.environ.get("GRABLI_MODE", "").strip().lower()
+    if chosen not in MODES:
+        try:
+            chosen = (home() / "mode").read_text(encoding="utf-8").strip().lower()
+        except (OSError, UnicodeDecodeError):
+            chosen = ""
+    return chosen if chosen in MODES else "auto"
+
+
 def find_secret(text: str) -> str | None:
     """Describe the first thing in text that looks like a credential, or None."""
     for number, line in enumerate(text.splitlines(), start=1):
@@ -55,6 +73,7 @@ class Store:
         self.entries_dir = self.root / "entries"
         self.pending_dir = self.root / "pending"
         self.cache_dir = self.root / "cache"
+        self.retracted_dir = self.root / "retracted"
         self.log_path = self.root / "log.jsonl"
 
     def _ensure(self) -> None:
@@ -102,7 +121,8 @@ class Store:
     def new_id(self, kind: Kind) -> str:
         while True:
             candidate = new_id(kind)
-            if not any(self._path(candidate, p).exists() for p in (False, True)):
+            taken = any(self._path(candidate, p).exists() for p in (False, True))
+            if not taken and not (self.retracted_dir / f"{candidate}.md").exists():
                 return candidate
 
     def save(self, entry: Entry, pending: bool = False) -> Path:
@@ -123,10 +143,17 @@ class Store:
         """Move a pending draft into the journal, stamped as verified today."""
         draft = self.get(entry_id, pending=True)
         if draft is None:
-            raise EntryError(f"no pending draft {entry_id!r}")
+            unreviewed = self.get(entry_id)
+            if unreviewed is None or unreviewed.reviewed:
+                raise EntryError(f"no pending draft {entry_id!r}")
+            # Written in auto mode: accepting it means a human has now read it.
+            entry = unreviewed.model_copy(update={"reviewed": True, "last_verified": date.today()})
+            self.save(entry)
+            self.log("accept", ids=[entry_id])
+            return entry
         if self._path(entry_id, pending=False).exists():
             raise EntryError(f"journal already has an entry {entry_id!r}; not overwriting it")
-        entry = draft.model_copy(update={"last_verified": date.today()})
+        entry = draft.model_copy(update={"reviewed": True, "last_verified": date.today()})
         self.save(entry)
         self._path(entry_id, pending=True).unlink()
         self.log("accept", ids=[entry_id])
@@ -138,6 +165,32 @@ class Store:
             raise EntryError(f"no pending draft {entry_id!r}")
         path.unlink()
         self.log("reject", ids=[entry_id])
+
+    def set_mode(self, chosen: str) -> None:
+        if chosen not in MODES:
+            raise EntryError(f"unknown mode {chosen!r}")
+        self._ensure()
+        (self.root / "mode").write_text(chosen + "\n", encoding="utf-8")
+
+    def retract(self, entry_id: str, reason: str, via: str = "cli") -> Path:
+        """Take an entry out of the journal. The file moves to `retracted/`, it is not deleted."""
+        path = self._path(entry_id, pending=False)
+        if not path.is_file():
+            raise EntryError(f"no entry {entry_id!r} in the journal")
+        self.retracted_dir.mkdir(parents=True, exist_ok=True)
+        target = self.retracted_dir / path.name
+        os.replace(path, target)
+        self.log("retract", ids=[entry_id], reason=reason, via=via)
+        return target
+
+    def find_by_title(self, title: str, kind: Kind) -> Entry | None:
+        """The active journal entry of this kind with the same title, if any."""
+        key = title_key(title)
+        for entry in self.load()[0]:
+            same = entry.kind == kind and title_key(entry.title) == key
+            if same and entry.superseded_by is None:
+                return entry
+        return None
 
     def log(self, event: str, **fields: object) -> None:
         """Append one usage event. The log is what the evals read."""
