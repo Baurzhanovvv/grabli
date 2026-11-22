@@ -21,7 +21,15 @@ from pathlib import Path
 from typing import TextIO
 
 from .capture import post_compact, pre_compact
-from .context import detect_stack, for_file, for_session, render, repo_root
+from .context import (
+    SESSION_FULL,
+    SESSION_LISTED,
+    detect_stack,
+    for_file,
+    for_session,
+    render,
+    repo_root,
+)
 from .store import Store
 
 
@@ -29,7 +37,9 @@ def session_start(payload: dict, store: Store) -> str | None:
     root = repo_root(Path(payload["cwd"]))
     stack = detect_stack(root)
     entries, _ = store.load()
-    chosen = for_session(entries, stack)
+    relevant = for_session(entries, stack, limit=None)
+    chosen = relevant[:SESSION_FULL]
+    listed = relevant[SESSION_FULL : SESSION_FULL + SESSION_LISTED]
     store.log(
         "session_start",
         session_id=payload.get("session_id"),
@@ -37,10 +47,14 @@ def session_start(payload: dict, store: Store) -> str | None:
         repo=root.name,
         stack=sorted(stack),
         ids=[entry.id for entry in chosen],
+        # Named by title only: not "shown", so pre-edit can still deliver them in full.
+        listed=[entry.id for entry in listed],
     )
     if not chosen:
         return None
-    return render(chosen, f"подобранные по стеку этого репозитория ({', '.join(sorted(stack))})")
+    return render(
+        chosen, f"подобранные по стеку этого репозитория ({', '.join(sorted(stack))})", listed
+    )
 
 
 def pre_edit(payload: dict, store: Store, block: bool = False) -> str | None:

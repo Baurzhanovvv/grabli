@@ -398,3 +398,112 @@ def test_cli_propose_reports_rejection(store, monkeypatch, capsys):
     assert cli.main(["propose", "Заголовок записи"]) == 1
     assert "Отклонено" in capsys.readouterr().err
     assert store.load(pending=True) == ([], [])
+
+
+# --- what a delivered entry contains ----------------------------------------
+
+LONG = (
+    "## Что случилось\n" + "Долгий рассказ об ошибке. " * 30 + "\n\n"
+    "## Почему не поймали\n" + "Подробности про тесты. " * 20 + "\n\n"
+    "## Как делать\nПериод передавать явно и проверять на данных по обе стороны границы."
+)
+
+
+def test_long_entry_is_delivered_with_its_action_section_first_and_whole():
+    from grabli.context import digest
+
+    text = digest(LONG)
+    assert len(LONG) > 1100 >= len(text)
+    assert text.startswith("## Как делать\nПериод передавать явно")
+    assert "по обе стороны границы." in text
+    assert "## Что случилось" in text and text.endswith("…")  # the story is what gets cut
+
+
+def test_digest_leaves_short_entries_alone_and_cuts_unstructured_ones():
+    from grabli.context import digest
+
+    assert digest("## Как делать\nКоротко.") == "## Как делать\nКоротко."
+    plain = digest("слово " * 400)
+    assert len(plain) <= 1100 and plain.endswith("…")
+    decision = "## Что выбрали\n" + "Текст. " * 200 + "\n## Как применять\nВключать за флагом."
+    assert digest(decision).startswith("## Как применять\nВключать за флагом.")
+
+
+def test_session_start_lists_further_entries_by_title_and_leaves_them_for_pre_edit(
+    repo, store, make_entry
+):
+    for number in range(5):
+        make_entry(title=f"Запись номер {number}", body=LONG)
+    code, out = run_hook("session-start", {"session_id": "s1", "cwd": str(repo)})
+    text = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    event = log_events(store)[-1]
+
+    assert code == 0 and len(text) < 10_000  # Claude Code's limit for hook context
+    assert text.count("## Как делать") == 3
+    assert "только заголовки" in text
+    assert (len(event["ids"]), len(event["listed"])) == (3, 2)
+    assert all(entry_id in text for entry_id in event["listed"])
+    assert store.shown_ids("s1") == set(event["ids"])  # listed ones are not "shown"
+
+
+# --- review of the digest ---------------------------------------------------
+
+STORY = "## Что случилось\n" + "Долгий рассказ об ошибке. " * 50 + "\n\n"
+
+
+def _digest(body: str) -> str:
+    from grabli.context import digest
+
+    text = digest(body)
+    assert len(text) <= 1100 + len("\n```")  # the budget, plus a fence closed after a cut
+    return text
+
+
+def test_digest_ignores_headings_inside_code_fences_and_never_leaves_a_fence_open():
+    action = (
+        "## Как делать\nСначала миграция:\n```bash\n# сначала миграция\nyarn m:run\n```\n"
+        "Потом деплой."
+    )
+    text = _digest(STORY + action)
+    assert text.startswith(action)
+
+    fenced_story = "## Что случилось\n```bash\n# how to run\n" + "echo шаг\n" * 200 + "```\n\n"
+    text = _digest(fenced_story + "## Как делать\nНе запускать под root.")
+    assert text.startswith("## Как делать\nНе запускать под root.")
+    assert sum(line.startswith("```") for line in text.split("\n")) % 2 == 0
+
+
+def test_digest_keeps_subsections_inside_the_action_section():
+    action = "## Как делать\n### Backend\nПериод явно.\n### Frontend\nПередавать даты."
+    assert _digest(STORY + action + "\n\n## Источник\nревью").startswith(action)
+
+
+@pytest.mark.parametrize(
+    "decoy", ["## How to reproduce", "## Как делать не надо", "## Show tooltip"]
+)
+def test_digest_does_not_take_lookalike_headings_for_the_action(decoy):
+    body = f"{decoy}\n" + "Шаг воспроизведения. " * 70 + "\n\n## Как делать\nЧинить так."
+    assert _digest(body).startswith("## Как делать\nЧинить так.")
+    assert _digest(f"{decoy}\n" + "Текст без вывода. " * 90).startswith(decoy)  # plain cut
+
+
+def test_digest_finds_the_action_in_prose_entries():
+    prose = (
+        "Что случилось: " + "рассказ. " * 160 + "\nКак делать правильно: период передавать явно."
+    )
+    assert _digest(prose).startswith("Как делать правильно: период передавать явно.")
+    inline = "Рассказ. " * 160 + "Как применять: включать за флагом."
+    assert _digest(inline).startswith("Как применять: включать за флагом.")
+
+
+def test_digest_of_an_action_only_entry_uses_the_whole_budget():
+    text = _digest("## Как делать\n" + "Шаг процедуры. " * 120)
+    assert 1050 < len(text) <= 1100 and text.endswith("…")
+
+
+def test_listed_titles_carry_the_unreviewed_mark(make_entry):
+    from grabli.context import render
+
+    text = render([make_entry()], "по стеку", [make_entry(), make_entry(reviewed=False)])
+    listing = text.split("только заголовки")[1]
+    assert listing.count("не проверено") == 1

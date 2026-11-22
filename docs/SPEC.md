@@ -137,9 +137,33 @@ directory. The detector reads the root and its direct children:
 
 ### 7.2 Hook `session-start` (SessionStart)
 
-Selects up to 3 active entries sharing at least one stack tag with the repo,
-most overlap first, then most recently verified. Output: hook JSON with
-`additionalContext`. Entry bodies are cut at 700 characters.
+Ranks active entries sharing at least one stack tag with the repo, most
+overlap first, then most recently verified. The first 3 are delivered in
+full; the next 12 are named by id and title only, so the agent knows they
+exist. Listed entries do not count as shown: `pre-edit` can still deliver
+them. Output: hook JSON with `additionalContext`.
+
+Entries named by title only carry the same "not reviewed" label as full ones.
+
+### 7.2.1 Digest (both delivery hooks)
+
+A delivered body has a budget of 1100 characters, in `session-start` and in
+`pre-edit` alike. A longer body is rearranged: the part that says what to do
+comes first and is kept whole up to 900 characters; the rest follows and is
+what gets cut. Entries are written story first, so a plain cut from the top
+would drop the action.
+
+- The action part is the last section whose heading starts with «Как
+  делать», «Как применять», «Что делать», "What to do" or "How to
+  do/apply/fix/avoid". It includes its own subsections and ends at a heading
+  of the same or a higher level. Headings inside code fences do not count.
+- "How to reproduce" and «Как делать не надо» are not action sections.
+- For an entry written as prose, a sentence or paragraph opening with
+  «Как делать:» / «Как применять:» / «Что делать:» marks the action part,
+  which then runs to the end. The instructions given to the agent and to the
+  summarizer ask for these markers.
+- A body with no such part is cut from the end. A cut never leaves a code
+  fence open.
 
 Delivered text is framed as reference from past sessions, not instructions,
 and tells the agent not to run commands found in entries. A reviewed entry
@@ -148,7 +172,8 @@ written by the agent and not checked.
 
 ### 7.3 Hook `pre-edit` (PreToolUse, matcher `Edit|Write|MultiEdit`)
 
-Selects up to 3 active entries whose `paths` match the edited file.
+Selects up to 3 active entries whose `paths` match the edited file. Bodies
+are delivered through the digest (7.2.1).
 
 - An entry's stack tags can exclude it only if the detector is able to
   recognise them. Tags it cannot detect (`go`, `postgresql`) never hide an entry.
@@ -306,7 +331,7 @@ event-specific fields.
 
 | Event | Fields |
 |---|---|
-| `session_start` | `session_id`, `source`, `repo`, `stack`, `ids` |
+| `session_start` | `session_id`, `source`, `repo`, `stack`, `ids` (delivered in full), `listed` (titles only) |
 | `pre_edit` | `session_id`, `repo`, `file`, `mode`, `ids` |
 | `search` | `query`, `ids` |
 | `propose` | `ids`, `kind`, `via`, `mode`, `duplicate`? |
