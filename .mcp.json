@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "grabli": {
+      "command": "uv",
+      "args": ["run", "--directory", "${CLAUDE_PROJECT_DIR:-.}", "grabli", "serve"]
+    }
+  }
+}
