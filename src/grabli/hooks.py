@@ -7,6 +7,9 @@ delivers that context alongside the tool result, i.e. after the first edit.
 `pre-edit --block` instead refuses the edit once, with the entries as the
 reason, so the agent reads them before it writes. The retry passes because
 an entry is delivered at most once per session.
+
+`pre-compact` and `post-compact` go the other way: they capture lessons
+from a session whose context is about to be summarized (see `capture`).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
+from .capture import post_compact, pre_compact
 from .context import detect_stack, for_file, for_session, render, repo_root
 from .store import Store
 
@@ -73,7 +77,11 @@ def pre_edit(payload: dict, store: Store, block: bool = False) -> str | None:
 _HANDLERS: dict[str, tuple[str, Callable[..., str | None]]] = {
     "session-start": ("SessionStart", session_start),
     "pre-edit": ("PreToolUse", pre_edit),
+    "pre-compact": ("PreCompact", pre_compact),
+    "post-compact": ("PostCompact", post_compact),
 }
+# Claude Code reads PreCompact's plain stdout as instructions for the summary.
+_PLAIN_STDOUT = {"pre-compact"}
 
 EVENTS = tuple(_HANDLERS)
 BLOCK_EXIT_CODE = 2  # Claude Code: the tool call is refused and stderr goes to the model
@@ -112,7 +120,9 @@ def run(
     if text and block:
         print(text, file=stderr)
         return BLOCK_EXIT_CODE
-    if text:
+    if text and event in _PLAIN_STDOUT:
+        stdout.write(text)
+    elif text:
         json.dump(
             {"hookSpecificOutput": {"hookEventName": hook_event, "additionalContext": text}},
             stdout,

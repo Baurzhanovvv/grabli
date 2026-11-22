@@ -113,6 +113,13 @@ def build(fields: dict) -> Entry:
         raise EntryError(problems) from exc
 
 
+class _PlainDumper(yaml.SafeDumper):
+    """Equal dates must not become `&id001` / `*id001`: the files are read and edited by hand."""
+
+    def ignore_aliases(self, data: object) -> bool:
+        return True
+
+
 def dump(entry: Entry) -> str:
     """Serialize an entry to file text. Deterministic, so it doubles as a fingerprint source."""
     meta = entry.model_dump(exclude={"body"})
@@ -121,5 +128,7 @@ def dump(entry: Entry) -> str:
             del meta[optional]
     if meta.get("source"):
         meta["source"] = {k: v for k, v in meta["source"].items() if v is not None}
-    front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False, default_flow_style=None)
+    front = yaml.dump(
+        meta, Dumper=_PlainDumper, allow_unicode=True, sort_keys=False, default_flow_style=None
+    )
     return f"{_DELIMITER}\n{front}{_DELIMITER}\n{entry.body}\n"

@@ -217,3 +217,10 @@ def test_index_surfaces_unreadable_files(store, make_entry):
     with Index(store) as index:
         assert len(index.search("отчет")) == 1
         assert index.errors and "m-broken.md" in index.errors[0]
+
+
+def test_dump_writes_equal_dates_without_yaml_anchors(make_entry):
+    today = date.today()  # one shared object is what makes PyYAML emit an anchor
+    text = dump(make_entry(created=today, last_verified=today))
+    assert "&id" not in text and "*id" not in text
+    assert parse(text).created == parse(text).last_verified
