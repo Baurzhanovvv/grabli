@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sqlite3
 import sys
 import tempfile
+from pathlib import Path
 
-from . import hooks
+from . import hooks, install
+from .context import repo_root
 from .index import Index
 from .models import EntryError, dump
 from .store import Store
@@ -141,6 +144,36 @@ def _hook(args: argparse.Namespace) -> int:
     return hooks.run(args.event, block=args.block)
 
 
+def _install(args: argparse.Namespace) -> int:
+    project = Path(args.path).expanduser().resolve()
+    if not project.is_dir():
+        raise install.InstallError(f"{project} is not a directory")
+    root = repo_root(project)
+    if root != project:
+        # Claude Code reads project settings from the repo root, not from a subdirectory.
+        print(f"{project} внутри репозитория {root}: ставлю в корень.")
+        project = root
+    command = install.launcher()
+    elsewhere = install.hooked_elsewhere(project)
+    if elsewhere:
+        print(f"Хуки уже подключены в {elsewhere}, второй раз не ставлю.")
+    else:
+        settings = install.write_hooks(project, command, block=args.block)
+        print(f"Хуки: {settings}")
+        if install.tracked_by_git(project, settings):
+            print(f"Внимание: {settings.name} не в .gitignore и попадёт в git.", file=sys.stderr)
+    if args.no_mcp:
+        return 0
+    status = install.add_mcp(project, command)
+    if status == "manual":
+        print("MCP: команда `claude` не найдена. Выполни в проекте:", file=sys.stderr)
+        print(f"  {shlex.join(install.mcp_command(command))}", file=sys.stderr)
+    else:
+        print("MCP: подключён" if status == "added" else "MCP: был подключён, обновил")
+    print("Открой новую сессию Claude Code в проекте: текущие сессии хуки не подхватят.")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="grabli", description="Журнал ошибок и решений агента.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -183,6 +216,18 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("id")
         command.set_defaults(run=handler)
 
+    setup = commands.add_parser(
+        "install", help="подключить проект: хуки в settings.local.json и MCP-сервер"
+    )
+    setup.add_argument(
+        "path", nargs="?", default=".", help="каталог проекта (по умолчанию текущий)"
+    )
+    setup.add_argument(
+        "--block", action="store_true", help="хук перед правкой в режиме однократного отклонения"
+    )
+    setup.add_argument("--no-mcp", action="store_true", help="только хуки, MCP не трогать")
+    setup.set_defaults(run=_install)
+
     hook = commands.add_parser("hook", help="обработчик хука Claude Code (читает JSON из stdin)")
     hook.add_argument("event", choices=hooks.EVENTS)
     hook.add_argument(
@@ -198,6 +243,6 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.run(args)
-    except (EntryError, sqlite3.Error, OSError) as exc:
+    except (EntryError, install.InstallError, sqlite3.Error, OSError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
