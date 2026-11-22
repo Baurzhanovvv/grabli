@@ -350,3 +350,51 @@ def test_cli_passes_block_flag(repo, store, make_entry, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert cli.main(["hook", "pre-edit", "--block"]) == hooks.BLOCK_EXIT_CODE
     assert "[grabli]" in capsys.readouterr().err
+
+
+def test_cli_propose_queues_a_draft_from_flags(store, make_entry, capsys):
+    existing = make_entry()
+    code = cli.main(
+        [
+            "propose",
+            "Отчёт за период без таймзоны",
+            "--body",
+            "Граница суток съехала.",
+            "--stack",
+            "NestJS",
+            "--stack",
+            "postgres",
+            "--paths",
+            "**/reports/**",
+            "--project",
+            "shop",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    (draft,) = store.load(pending=True)[0]
+    assert draft.id in out
+    assert existing.id in out  # similar entries are shown
+    assert (draft.kind, draft.stack, draft.paths) == (
+        "mistake",
+        ["nestjs", "postgres"],
+        ["**/reports/**"],
+    )
+    assert draft.source.found_by == "human"
+    assert store.load()[0] == [existing]  # still needs `accept`
+
+
+def test_cli_propose_reads_body_from_stdin(store, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", io.StringIO("## Почему\nТак быстрее откатывать.\n"))
+    assert cli.main(["propose", "Флаги выключены по умолчанию", "--kind", "decision"]) == 0
+    (draft,) = store.load(pending=True)[0]
+    assert draft.kind == "decision"
+    assert draft.body == "## Почему\nТак быстрее откатывать."
+
+
+def test_cli_propose_reports_rejection(store, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", io.StringIO("   \n"))
+    assert cli.main(["propose", "Заголовок записи"]) == 1
+    assert "Отклонено" in capsys.readouterr().err
+    assert store.load(pending=True) == ([], [])

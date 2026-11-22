@@ -10,7 +10,8 @@
 ## Как это работает
 
 1. Агент находит ошибку или принимает решение и вызывает MCP-инструмент
-   `propose`. Черновик попадает в очередь.
+   `propose`. Черновик попадает в очередь. Человек может завести черновик
+   и сам: `grabli propose`.
 2. Человек подтверждает черновик: `grabli review`. Только после этого запись
    попадает в журнал.
 3. В другом проекте хуки Claude Code сами подкладывают запись агенту:
@@ -47,6 +48,8 @@ superseded_by: null
 
 ```bash
 uv run grabli serve                  # MCP-сервер (stdio)
+uv run grabli propose "заголовок" --body "текст" [--kind decision] \
+    [--stack nestjs] [--paths '**/reports/**']   # черновик руками; без --body текст из stdin
 uv run grabli review                 # разобрать очередь черновиков
 uv run grabli pending                # показать очередь
 uv run grabli accept <id>            # принять черновик

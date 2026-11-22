@@ -161,3 +161,60 @@ def test_cli_search_clamps_nonpositive_limit(store, make_entry, capsys):
         make_entry(title=f"Отчёт номер {number}")
     assert cli.main(["search", "отчет", "--limit", "-1"]) == 0
     assert capsys.readouterr().out.count("mistake") == 1
+
+
+# --- second review: the `grabli propose` command ----------------------------
+
+
+def _events(store) -> list[dict]:
+    return [json.loads(line) for line in store.log_path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_propose_keeps_the_draft_when_similar_search_fails(store, monkeypatch):
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("grabli.server.Index", locked)
+    result = do_propose(store, "mistake", "Заголовок записи", "текст")
+
+    assert result["status"] == "pending"
+    assert "database is locked" in result["warnings"][0]
+    assert [draft.id for draft in store.load(pending=True)[0]] == [result["id"]]
+
+
+def test_event_log_tells_cli_proposals_from_agent_ones(store, monkeypatch):
+    do_propose(store, "mistake", "Заголовок от агента", "текст")
+    monkeypatch.setattr("sys.stdin", io.StringIO("текст"))
+    assert cli.main(["propose", "Заголовок от человека"]) == 0
+    assert [event["via"] for event in _events(store) if event["event"] == "propose"] == [
+        "mcp",
+        "cli",
+    ]
+
+
+def test_cli_stack_values_are_split_into_tags(store, capsys):
+    args = ["propose", "Заголовок записи", "--body", "текст"]
+    assert cli.main([*args, "--stack", "nestjs,postgres", "--stack", "TypeORM redis"]) == 0
+    (draft,) = store.load(pending=True)[0]
+    assert draft.stack == ["nestjs", "postgres", "typeorm", "redis"]
+
+
+def test_cli_keeps_typed_text_when_the_draft_is_rejected(store, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    monkeypatch.setattr("sys.stdin", io.StringIO("Три абзаца, которые жалко потерять."))
+
+    assert cli.main(["propose", "ab"]) == 1  # title too short
+
+    err = capsys.readouterr().err
+    (kept,) = tmp_path.glob("grabli-draft-*.md")
+    assert str(kept) in err
+    assert kept.read_text(encoding="utf-8") == "Три абзаца, которые жалко потерять."
+
+
+def test_cli_reports_storage_errors_without_a_traceback(store, monkeypatch, capsys):
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("grabli.cli.Index", locked)
+    assert cli.main(["search", "отчет"]) == 1
+    assert "database is locked" in capsys.readouterr().err

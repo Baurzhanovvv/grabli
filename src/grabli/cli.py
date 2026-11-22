@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import re
+import sqlite3
 import sys
+import tempfile
 
 from . import hooks
 from .index import Index
@@ -39,6 +42,47 @@ def _search(args: argparse.Namespace) -> int:
     for hit in hits:
         print(f"{hit.id}  {hit.kind:<8}  {hit.score:>9.3g}  {hit.title}")
         print(f"    {hit.snippet}")
+    return 0
+
+
+def _propose(args: argparse.Namespace) -> int:
+    from .server import do_propose  # same rules as the MCP tool; the SDK import is slow
+
+    body = args.body
+    typed = body is None
+    if typed:
+        if sys.stdin.isatty():
+            print("Текст записи (закончить: Ctrl-D):", file=sys.stderr)
+        body = sys.stdin.read()
+    # `--stack nestjs,postgres` means two tags, not one that never matches a repo.
+    stack = [tag for value in args.stack or [] for tag in re.split(r"[,\s]+", value) if tag]
+    result = do_propose(
+        Store(),
+        args.kind,
+        args.title,
+        body,
+        project=args.project,
+        stack=stack,
+        paths=args.paths,
+        repo=args.repo,
+        commit=args.commit,
+        found_by=args.found_by,
+        via="cli",
+    )
+    if result["status"] == "rejected":
+        print(f"Отклонено: {result['reason']}", file=sys.stderr)
+        if typed and body.strip():
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", prefix="grabli-draft-", suffix=".md", delete=False
+            ) as kept:
+                kept.write(body)
+            print(f"Набранный текст сохранён: {kept.name}", file=sys.stderr)
+        return 1
+    _warn(result.get("warnings", []))
+    print(f"Черновик: {result['id']}")
+    for similar in result.get("similar", []):
+        print(f"  похожая запись: {similar['id']}  {similar['title']}")
+    print(f"Принять: grabli accept {result['id']}")
     return 0
 
 
@@ -111,6 +155,23 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=5)
     search.set_defaults(run=_search)
 
+    propose = commands.add_parser(
+        "propose", help="предложить запись (текст из --body или из stdin)"
+    )
+    propose.add_argument("title")
+    propose.add_argument("--kind", choices=["mistake", "decision"], default="mistake")
+    propose.add_argument(
+        "--body",
+        help="текст записи; без него читается stdin. Текст с дефиса пишется как --body=-текст",
+    )
+    propose.add_argument("--project")
+    propose.add_argument("--stack", action="append", help="технология; можно повторять")
+    propose.add_argument("--paths", action="append", help="glob-маска файлов; можно повторять")
+    propose.add_argument("--repo")
+    propose.add_argument("--commit")
+    propose.add_argument("--found-by", dest="found_by", default="human")
+    propose.set_defaults(run=_propose)
+
     commands.add_parser("pending", help="показать очередь черновиков").set_defaults(run=_pending)
     commands.add_parser("review", help="разобрать очередь по одному").set_defaults(run=_review)
 
@@ -137,6 +198,6 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.run(args)
-    except EntryError as exc:
+    except (EntryError, sqlite3.Error, OSError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date
 from typing import Any
 
@@ -86,7 +87,9 @@ def do_propose(
     repo: str | None = None,
     commit: str | None = None,
     found_by: str | None = None,
+    via: str = "mcp",
 ) -> dict[str, Any]:
+    """`via` goes to the event log, so evals can tell agent proposals from manual ones."""
     secret = find_secret(body) or find_secret(title)
     if secret:
         return {
@@ -129,10 +132,19 @@ def do_propose(
     except EntryError as exc:
         return {"status": "rejected", "reason": str(exc)}
 
-    with Index(store) as index:
-        similar = [{"id": hit.id, "title": hit.title} for hit in index.search(entry.title, limit=3)]
+    # Save first: looking for similar entries is a convenience and must not lose the draft.
     store.save(entry, pending=True)
-    store.log("propose", ids=[entry.id], kind=kind)
+    store.log("propose", ids=[entry.id], kind=kind, via=via)
+    similar: list[dict[str, str]] = []
+    warnings: list[str] = []
+    try:
+        with Index(store) as index:
+            similar = [
+                {"id": hit.id, "title": hit.title} for hit in index.search(entry.title, limit=3)
+            ]
+            warnings = list(index.errors)
+    except (sqlite3.Error, OSError) as exc:
+        warnings = [f"поиск похожих записей не выполнен: {exc}"]
 
     result: dict[str, Any] = {
         "status": "pending",
@@ -143,6 +155,8 @@ def do_propose(
     if similar:
         result["similar"] = similar
         result["hint"] += " В журнале есть похожие записи: скажи о них пользователю."
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 
