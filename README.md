@@ -1,79 +1,142 @@
 # grabli
 
-Журнал ошибок и решений, который переносит опыт агента между проектами.
-Название от «наступать на те же грабли».
+> *наступать на те же грабли*: Russian for "to step on the same rake twice".
 
-Проект отвечает на один вопрос: снижает ли такая память повторные ошибки
-агента. Сервер здесь средство, главный результат — замеры (этапы 3 и 4,
-ещё не сделаны).
+Your coding agent makes a mistake. Review catches it, you fix it, everyone
+moves on. Three weeks later, in a different repository, the agent makes the
+same mistake, because nothing it learned survived the session.
 
-## Как это работает
+grabli is a journal of those mistakes that follows the agent from project to
+project, and puts the right entry in front of it at the moment it is about
+to repeat one.
 
-1. Агент находит ошибку или принимает решение и вызывает MCP-инструмент
-   `propose`. Черновик попадает в очередь. Человек может завести черновик
-   и сам: `grabli propose`.
-2. Человек подтверждает черновик: `grabli review`. Только после этого запись
-   попадает в журнал.
-3. В другом проекте хуки Claude Code сами подкладывают запись агенту:
-   на старте сессии по стеку репозитория, перед правкой файла по маскам
-   путей из записи.
-4. Агент может искать и сам: MCP-инструмент `search`.
-5. Когда Claude Code сжимает контекст (сам или по `/compact`), хук
-   `pre-compact` просит добавить в summary блок уроков сессии, а
-   `post-compact` превращает этот блок в черновики. Они тоже ждут
-   `grabli review`.
+## The mistake that started it
 
-## Запись
+A year-to-date report summed from January 1 instead of from the start of the
+reporting period. The tests were green and it shipped. The first code review
+found it.
 
-Markdown с frontmatter в `~/.grabli/entries/<id>.md`:
+In grabli a mistake like that becomes one file (an illustrative entry):
 
 ```markdown
 ---
 id: m-k3x9qa
-kind: mistake            # или decision
-title: YTD без привязки к отчётному периоду
-project: finance-app
+kind: mistake
+title: YTD without a reporting period
 stack: [nestjs, postgres]
-paths: ['**/reports/**', '**/*ytd*']   # перед правкой каких файлов показать
-source: {repo: finance-app, commit: a1b2c3d, found_by: code-review}
+paths: ['**/reports/**', '**/*ytd*']
+source: {repo: finance-app, found_by: code-review}
 created: 2026-11-22
 last_verified: 2026-11-22
-superseded_by: null
 ---
-## Что случилось
-...
+The report summed from the start of the calendar year. Pass the period
+explicitly, and test with dates on both sides of the period boundary.
 ```
 
-Файлы — источник правды, их можно править руками и хранить в git.
-`cache/index.sqlite` пересобирается из них сам, `log.jsonl` хранит события
-для замеров.
+Next time an agent opens `src/reports/anything.ts` in any NestJS project of
+yours, it gets this entry before it writes the bug again.
 
-## Команды
+## How it works
+
+```mermaid
+flowchart LR
+    A[Agent finds a mistake] -->|MCP: propose| Q[(Review queue)]
+    H[You] -->|grabli propose| Q
+    C[Context compaction] -->|lessons from the summary| Q
+    Q -->|grabli review| J[(Journal)]
+    J -->|session start: by repo stack| S[Agent, another project]
+    J -->|before an edit: by file path| S
+    J -->|MCP: search| S
+```
+
+Three things make it more than a notes folder:
+
+- **It delivers, the agent does not have to ask.** Hooks match entries
+  against the repository's stack at session start and against the file path
+  before every edit.
+- **Nothing is written without you.** Every draft, whoever proposed it,
+  waits for `grabli review`. An agent cannot fill its own memory with noise.
+- **It catches lessons that would otherwise be lost.** When Claude Code
+  compacts the context, grabli asks the summarizer for the session's
+  lessons and queues them as drafts.
+
+## The question
+
+Memory tools for agents are easy to build and rarely measured. This project
+is built to answer one thing with numbers: **does a mistake journal reduce
+an agent's repeat mistakes?**
+
+The measurements are not done yet. What exists so far are single-run
+observations, and they already changed the design:
+
+| Observation (one run each) | Consequence |
+|---|---|
+| Context added by a pre-edit hook reaches the agent *after* its first edit. It wrote the bug, read the entry, then fixed it. | Added `--block`: refuse the edit once, so the entry is read first. |
+| In block mode the buggy version never reached disk. Same number of turns. | Context vs. block is now a condition in the eval, not a guess. |
+| Running the agent with global hooks and config loaded took 8 turns; isolated, 3. | Eval runs are isolated from the user's own setup. |
+
+The plan, the conditions, and the metrics are in [docs/SPEC.md](docs/SPEC.md).
+
+## Quick start
+
+Requires Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code.
 
 ```bash
-uv run grabli serve                  # MCP-сервер (stdio)
-uv run grabli propose "заголовок" --body "текст" [--kind decision] \
-    [--stack nestjs] [--paths '**/reports/**']   # черновик руками; без --body текст из stdin
-uv run grabli review                 # разобрать очередь черновиков
-uv run grabli pending                # показать очередь
-uv run grabli accept <id>            # принять черновик
-uv run grabli reject <id>            # удалить черновик
-uv run grabli search "запрос" [--kind mistake] [--stack nestjs]
-uv run grabli hook session-start     # обработчики хуков, читают JSON из stdin
-uv run grabli hook pre-edit [--block]
-uv run grabli hook pre-compact       # печатает инструкцию для summary
-uv run grabli hook post-compact      # черновики из блока уроков в summary
+git clone https://github.com/Baurzhanovvv/grabli.git
+cd grabli && uv sync
+
+# connect any project: hooks + MCP server, nothing enters that project's git
+uv run grabli install ~/code/my-project
 ```
 
-`GRABLI_HOME` меняет каталог журнала (по умолчанию `~/.grabli`).
+Open a new Claude Code session in that project. Then:
 
-## Подключение к проекту
+```bash
+uv run grabli propose "YTD without a reporting period" \
+  --body "Summed from January 1. Pass the period explicitly." \
+  --stack nestjs --paths '**/reports/**'
 
-Хуки и MCP-сервер для самого репозитория grabli уже описаны в
-`.claude/settings.json` и `.mcp.json`. В другом проекте нужны те же два
-файла с абсолютным путём к grabli в `--directory`.
+uv run grabli review        # accept, reject or skip each draft
+uv run grabli search "report period"
+```
 
-## Разработка
+Or just tell the agent: *"log this mistake in grabli"*.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `grabli install [path] [--block] [--no-mcp]` | Connect a project to the journal |
+| `grabli propose <title> [--body ...]` | Queue a draft by hand |
+| `grabli review` | Walk the queue |
+| `grabli pending` / `accept <id>` / `reject <id>` | Queue operations |
+| `grabli search <query>` | Search the journal |
+| `grabli serve` | MCP server with two tools: `search`, `propose` |
+| `grabli hook <event>` | Hook handlers, called by Claude Code |
+
+The journal lives in `~/.grabli` (`GRABLI_HOME` changes that) as plain
+Markdown files. Edit them by hand, keep them in git; the search index
+rebuilds itself.
+
+## Design choices
+
+- **Files are the source of truth.** The SQLite index and the event log can
+  be deleted at any time.
+- **Two entry kinds, not a knowledge base.** `mistake` and `decision`.
+- **No embeddings yet.** Search is SQLite FTS5 with BM25 and Russian
+  stemming. Embeddings get added if the retrieval eval shows a measurable gain.
+- **Broken memory never breaks work.** A failing hook exits 0 and logs the error.
+- **Every delivery is logged**, so the evals read what actually happened.
+
+## Limitations
+
+- Search is lexical. A query with no shared word stems finds nothing.
+- The secret check on proposed entries is a list of regular expressions, not a guarantee.
+- Compaction capture depends on the summarizer following instructions.
+  It has been observed working once, on a manual `/compact`.
+- Claude Code only. The MCP tools work with any client, the hooks do not.
+
+## Development
 
 ```bash
 uv sync
@@ -81,25 +144,5 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-## Ограничения
-
-- Поиск лексический: SQLite FTS5 с BM25 и стеммингом русских слов. Запрос
-  другими словами, без общих корней с записью, ничего не найдёт. Стеммер
-  не справляется с беглыми гласными и однокоренными словами: «ошибка» не
-  находит «ошибок», «отчётный» не находит «отчёт». Чем это закрывать
-  (лемматизация или эмбеддинги), решит замер на этапе 3.
-- Журнал событий `log.jsonl` не ротируется и читается целиком при каждой
-  правке файла.
-- У хука перед правкой два режима. По умолчанию он только добавляет
-  контекст, и Claude Code отдаёт его модели вместе с результатом
-  инструмента, то есть после первой правки: агент пишет файл, видит запись
-  и исправляет. С `--block` хук один раз отклоняет правку и отдаёт записи
-  как причину, так что агент читает их до записи файла. Какой режим лучше,
-  покажет замер.
-- Захват уроков при сжатии контекста зависит от того, выполнит ли
-  суммаризатор инструкцию и выдержит ли формат блока. Сколько раз блок
-  пришёл и сколько записей из него получилось, пишется в `log.jsonl`
-  событием `compact_capture`. Блок остаётся в summary, то есть в контексте
-  после сжатия.
-- Защита от секретов в тексте записи — набор регулярных выражений, а не
-  гарантия.
+The full behavior is specified in [docs/SPEC.md](docs/SPEC.md). A change in
+behavior updates the spec in the same commit.
