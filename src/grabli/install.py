@@ -1,6 +1,6 @@
 """`grabli install`: connect a project to the journal.
 
-Writes the five hooks into the project's `.claude/settings.local.json` and
+Writes the hooks into the project's `.claude/settings.local.json` and
 registers the MCP server in Claude Code's local scope. Both are private to
 the user, so nothing enters the project's git. Running it again replaces
 grabli's own hooks and leaves everything else in the file alone.
@@ -19,18 +19,25 @@ import tempfile
 from pathlib import Path
 
 _MARK = "grabli hook "
-# A hook this command wrote: one plain command ending in `grabli hook <event>`. A compound
-# command that merely contains it belongs to the user and is left alone.
-_OWN = re.compile(
-    r"[^;&|]*\bgrabli hook (session-start|session-end|pre-edit|pre-compact|post-compact)"
-    r"( --block)?\s*"
-)
+# Event, handler, timeout, matcher. The handlers named in _ASYNC only observe.
 _HOOKS: tuple[tuple[str, str, int, str | None], ...] = (
     ("SessionStart", "session-start", 15, None),
     ("PreToolUse", "pre-edit", 15, "Edit|Write|MultiEdit"),
     ("PreCompact", "pre-compact", 15, None),
     ("PostCompact", "post-compact", 30, None),
     ("SessionEnd", "session-end", 15, None),
+    # These three deliver nothing; they tell `grabli status` whether an agent works or waits.
+    ("UserPromptSubmit", "prompt", 15, None),
+    ("Stop", "stop", 15, None),
+    ("Notification", "notification", 15, None),
+    ("PostToolUse", "tool", 15, None),
+)
+# Runs after every tool call, so it must not hold the agent up.
+_ASYNC = {"tool"}
+# A hook this command wrote: one plain command ending in `grabli hook <event>`. A compound
+# command that merely contains it belongs to the user and is left alone.
+_OWN = re.compile(
+    r"[^;&|]*\bgrabli hook (" + "|".join(name for _, name, _, _ in _HOOKS) + r")( --block)?\s*"
 )
 
 
@@ -84,7 +91,10 @@ def merge_hooks(settings: dict, command: list[str], block: bool = False) -> dict
         line = shlex.join([*command, "hook", name])
         if block and name == "pre-edit":
             line += " --block"
-        group: dict = {"hooks": [{"type": "command", "command": line, "timeout": timeout}]}
+        hook: dict = {"type": "command", "command": line, "timeout": timeout}
+        if name in _ASYNC:
+            hook["async"] = True
+        group: dict = {"hooks": [hook]}
         if matcher:
             group = {"matcher": matcher, **group}
         merged[event] = [*_without_grabli(event, hooks.get(event)), group]
@@ -118,6 +128,22 @@ def write_hooks(project: Path, command: list[str], block: bool = False) -> Path:
         Path(temporary).unlink(missing_ok=True)
         raise
     return path
+
+
+def hooked_in(project: Path) -> Path | None:
+    """The settings file that runs grabli's hooks for this project, if any."""
+    candidates = (
+        project / ".claude" / "settings.local.json",
+        project / ".claude" / "settings.json",
+        Path.home() / ".claude" / "settings.json",
+    )
+    for path in candidates:
+        try:
+            if _MARK in path.read_text(encoding="utf-8"):
+                return path
+        except (OSError, UnicodeDecodeError):
+            continue
+    return None
 
 
 def hooked_elsewhere(project: Path) -> Path | None:

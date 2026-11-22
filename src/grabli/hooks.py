@@ -89,13 +89,14 @@ def pre_edit(payload: dict, store: Store, block: bool = False) -> str | None:
     return render(chosen, f"относящиеся к файлу {path.name}. Учти их в этой правке")
 
 
-def session_end(payload: dict, store: Store) -> None:
+def observe(payload: dict, store: Store) -> None:
     """Nothing to deliver: the event exists for the activity record written in `run`."""
 
 
 def _record_activity(event: str, payload: dict, store: Store) -> None:
     """One line per hook call for `grabli status`: which project, which session, which file."""
-    file_path = (payload.get("tool_input") or {}).get("file_path")
+    # Only an edit names a file. A finished tool call is recorded as a bare sign of work.
+    file_path = (payload.get("tool_input") or {}).get("file_path") if event == "pre-edit" else None
     start = Path(file_path) if file_path else Path(payload.get("cwd") or "")
     if not start.is_absolute():
         return
@@ -117,12 +118,18 @@ def _record_activity(event: str, payload: dict, store: Store) -> None:
         source=payload.get("source"),
         reason=payload.get("reason"),
         trigger=payload.get("trigger"),
+        # The kind only. Neither the prompt nor the notification text is recorded.
+        notification=payload.get("notification_type"),
     )
 
 
 _HANDLERS: dict[str, tuple[str, Callable[..., str | None]]] = {
     "session-start": ("SessionStart", session_start),
-    "session-end": ("SessionEnd", session_end),
+    "session-end": ("SessionEnd", observe),
+    "prompt": ("UserPromptSubmit", observe),
+    "stop": ("Stop", observe),
+    "notification": ("Notification", observe),
+    "tool": ("PostToolUse", observe),
     "pre-edit": ("PreToolUse", pre_edit),
     "pre-compact": ("PreCompact", pre_compact),
     "post-compact": ("PostCompact", post_compact),

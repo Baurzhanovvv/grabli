@@ -332,7 +332,10 @@ def main(argv: list[str] | None = None) -> int:
                     f"{query['id']}: relevant ids not in the journal: {sorted(gone)}",
                     file=sys.stderr,
                 )
+            query["dropped"] = bool(query["relevant"]) and gone == set(query["relevant"])
             query["relevant"] = [item for item in query["relevant"] if item in live]
+        # A query whose every answer is gone is not a "no answer" query: leave it out.
+        queries = [query for query in queries if not query["dropped"]]
 
         engines: dict[str, Ranker] = {BASELINE: shipped(store), "fts5-lemma": lemmatized(entries)}
         for model in args.models:

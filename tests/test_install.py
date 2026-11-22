@@ -27,6 +27,10 @@ def test_merge_adds_the_hooks_and_quotes_paths_with_spaces():
         "PreToolUse",
         "PreCompact",
         "PostCompact",
+        "UserPromptSubmit",
+        "Stop",
+        "Notification",
+        "PostToolUse",
     }
     assert merged["hooks"]["PreToolUse"][0]["matcher"] == "Edit|Write|MultiEdit"
     assert commands(merged)["PreCompact"] == [
@@ -55,7 +59,8 @@ def test_merge_keeps_foreign_content_and_replaces_only_its_own_hooks():
     twice = install.merge_hooks(once, COMMAND, block=True)
 
     assert twice["permissions"] == settings["permissions"]
-    assert twice["hooks"]["Stop"] == [foreign]
+    assert twice["hooks"]["Stop"][0] == foreign  # kept, ours added after it, once
+    assert len(twice["hooks"]["Stop"]) == 2
     assert commands(twice)["SessionStart"][0] == "echo other"
     assert commands(twice)["PreToolUse"][0] == "lint.sh"  # the old grabli hook is gone
     assert [c for c in commands(twice)["PreToolUse"] if "grabli hook" in c] == [
@@ -67,7 +72,7 @@ def test_merge_keeps_foreign_content_and_replaces_only_its_own_hooks():
 def test_write_creates_the_file_and_refuses_to_overwrite_broken_json(tmp_path):
     path = install.write_hooks(tmp_path, COMMAND)
     assert path == tmp_path / ".claude" / "settings.local.json"
-    assert len(json.loads(path.read_text(encoding="utf-8"))["hooks"]) == 5
+    assert len(json.loads(path.read_text(encoding="utf-8"))["hooks"]) == 9
     assert [p.name for p in path.parent.iterdir()] == ["settings.local.json"]  # no temp left
 
     path.write_text("{broken", encoding="utf-8")

@@ -225,9 +225,13 @@ Parsing rules:
   compaction is skipped. This covers drafts the human rejected. Duplicates
   are removed before the limit of 3 is applied.
 
-### 7.5 Hook `session-end` (SessionEnd)
+### 7.5 Observing hooks
 
-Delivers nothing. It exists so the end of a session is recorded as activity.
+`session-end` (SessionEnd), `prompt` (UserPromptSubmit), `stop` (Stop),
+`notification` (Notification) and `tool` (PostToolUse, asynchronous, so it
+never holds the agent up) deliver nothing. They exist so `grabli status`
+can tell a working agent from a waiting one. The prompt text and the
+notification text are never recorded; only the notification kind is.
 
 ### 7.6 Activity record
 
@@ -319,7 +323,7 @@ there. For each project:
 
 | Field | Source |
 |---|---|
-| active | A hook fired within the last 15 minutes. |
+| state | `working`, `waiting` or `quiet`, see below. |
 | last activity, sessions in 24 h, recently edited files | `activity.jsonl` |
 | now, next | The project's own `.claude/memory/MEMORY.md`, read at display time. `now` is the "Current Status" section, or the first section when there is none; `next` is up to 3 unchecked items of "Next Steps". |
 | lessons | Journal entries whose `project` equals the directory name. |
@@ -336,13 +340,33 @@ labelled as data, not instructions.
 again. A project is named by its directory name, or by a path
 when two share one.
 
-A project whose last event is a session end is not shown as active. The
-view cannot tell a working agent from one waiting for input. `activity.jsonl`
-is not rotated and is read in full on every call.
+Each session has a state, moved by its events in order:
+
+| Event | State after it |
+|---|---|
+| `session-end` | quiet |
+| `stop`; a `notification` of kind `permission_prompt`, `idle_prompt`, `agent_needs_input`, `elicitation_dialog` or `elicitation_url_dialog`; `session-start` other than after a compaction | waiting: the agent needs the user |
+| `prompt`, `pre-edit`, `tool` | working |
+| a compaction, any other notification | unchanged |
+
+A waiting session counts its wait from the first event that put it there.
+A working session with no event for 1 hour, and any session with none for
+24 hours, is shown as quiet: a session killed without a SessionEnd would
+otherwise keep its last state forever.
+
+A project is `waiting` if any of its sessions is, else `working` if any is,
+else `quiet`. A session belongs to the project it runs in: an edit of a file
+in another repository is counted for the session's own project. Subagents
+are not seen separately.
+
+When a project's settings lack some of the observing hooks (it was connected
+by an older version), the view says so instead of showing a state it cannot
+know. `activity.jsonl` gets a line per tool call, is not rotated, and is
+read in full on every call.
 
 ### 8.4 `grabli install`
 
-Writes the five hooks into `.claude/settings.local.json` and registers the
+Writes the nine hooks into `.claude/settings.local.json` and registers the
 MCP server in Claude Code's local scope (`claude mcp add -s local`). Both
 are private to the user.
 

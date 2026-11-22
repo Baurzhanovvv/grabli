@@ -2,8 +2,10 @@
 
 Two sources, neither of which asks an agent to report anything:
 
-- `activity.jsonl`, written by the hooks on every session start, edit, compaction and
-  session end. It says when a project was last touched and which files were edited.
+- `activity.jsonl`, written by the hooks on every session start and end, prompt, edit,
+  compaction, finished tool call, end of turn and notification. It says whether an agent
+  is working or waiting for the user, when a project was last touched and which files
+  were edited.
 - each project's own `.claude/memory/MEMORY.md`, read when the status is shown. It is
   the project's source of truth for "now" and "next"; grabli keeps no second copy.
 
@@ -19,8 +21,17 @@ from pathlib import Path
 
 from .store import Store
 
-ACTIVE_WITHIN = timedelta(minutes=15)
+WORKING_WITHIN = timedelta(hours=1)  # a turn with no event for this long is taken as dead
 _DAY = timedelta(hours=24)
+WORKING, WAITING, QUIET = "working", "waiting", "quiet"
+# Notification kinds that mean the agent cannot go on without the user.
+_NEEDS_USER = {
+    "permission_prompt",
+    "idle_prompt",
+    "agent_needs_input",
+    "elicitation_dialog",
+    "elicitation_url_dialog",
+}
 _NOW_CHARS = 320
 _NEXT_ITEMS = 3
 _RECENT_FILES = 8
@@ -66,10 +77,43 @@ def read_memory(project: Path) -> dict | None:
         now = f"{title}. {body}"
     steps = _TODO.findall(find(_NEXT_HEADS) or "")
     return {
-        "now": _clip(now or text, _NOW_CHARS),
+        "now": _clip(text if now is None else now, _NOW_CHARS),
         "next": [_clip(step, 160) for step in steps[:_NEXT_ITEMS]],
         "updated": updated,
     }
+
+
+_NO_HOME = {"pre-edit", "tool", "install", "forget"}  # say nothing of where a session lives
+
+
+def _advance(session: dict, event: dict) -> None:
+    """Move one session's state by one event.
+
+    `stop` ends a turn, so the agent waits for the user; so does a fresh session and a
+    permission or idle notification. A prompt, an edit or a finished tool call means a turn
+    is running. A compaction and an informational notification change nothing: a session
+    compacted by hand while it waited still waits.
+    """
+    name, before = event["event"], session.get("state")
+    state = before
+    needs_user = name == "notification" and event.get("notification") in _NEEDS_USER
+    opened = name == "session-start" and event.get("source") != "compact"
+    if name == "session-end":
+        state = QUIET
+    elif name == "stop" or needs_user or opened:
+        state = WAITING
+    elif name in ("prompt", "pre-edit", "tool") or before is None:
+        state = WORKING
+    if state == WAITING and before != WAITING:
+        session["since"] = event["at"]  # the first moment of this wait, not its last reminder
+    session["state"], session["last"] = state, event["at"]
+
+
+def _expired(session: dict, now: datetime) -> str:
+    age = now - session["last"]
+    if age > _DAY or (session["state"] == WORKING and age > WORKING_WITHIN):
+        return QUIET  # a session killed without a SessionEnd, or a turn that died silently
+    return session["state"]
 
 
 def _events(store: Store) -> list[dict]:
@@ -85,50 +129,81 @@ def _events(store: Store) -> list[dict]:
             continue
         if record["at"].tzinfo is None:
             record["at"] = record["at"].replace(tzinfo=UTC)
-        if isinstance(record.get("root"), str) and isinstance(record.get("event"), str):
+        if not (isinstance(record.get("root"), str) and isinstance(record.get("event"), str)):
+            continue
+        if _scalar(record.get("session_id")) and _scalar(record.get("notification")):
             events.append(record)
     return events
+
+
+def _scalar(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def stale_hooks(project: Path) -> list[str] | None:
+    """grabli hooks the project's settings lack; None when no settings file runs grabli."""
+    from .install import hooked_in, missing_hooks  # install pulls in subprocess; keep it lazy
+
+    path = hooked_in(project)
+    return None if path is None else missing_hooks(path)
 
 
 def collect(store: Store, now: datetime | None = None) -> list[dict]:
     """One record per project the hooks have seen, most recently active first."""
     now = now or datetime.now(UTC)
+    events = _events(store)
+    # A session belongs to the project it runs in, wherever its edits land: an edit of a file
+    # in another repository must not leave a "working" session behind in that repository.
+    home: dict[str, str] = {}
+    for event in events:
+        session_id = event.get("session_id")
+        if session_id and event["event"] not in _NO_HOME:
+            home.setdefault(session_id, event["root"])
     by_root: dict[str, list[dict]] = {}
-    for order, event in enumerate(_events(store)):
+    for order, event in enumerate(events):
         event["order"] = order  # timestamps have one-second resolution; the file order breaks ties
-        by_root.setdefault(event["root"], []).append(event)
+        root = home.get(event.get("session_id") or "", event["root"])
+        by_root.setdefault(root, []).append(event)
     lessons: dict[str, int] = {}
     for entry in store.load()[0]:
         if entry.project:
             lessons[entry.project] = lessons.get(entry.project, 0) + 1
 
     projects = []
-    for root, events in by_root.items():
-        if events[-1]["event"] == "forget":
+    for root, history in by_root.items():
+        if history[-1]["event"] == "forget":
             continue
         path = Path(root)
-        work = [event for event in events if event["event"] not in ("install", "forget")]
+        work = [event for event in history if event["event"] not in ("install", "forget")]
         last = work[-1] if work else None
         files: list[str] = []
+        sessions: dict[str, dict] = {}
+        for event in work:
+            if event.get("session_id"):
+                _advance(sessions.setdefault(event["session_id"], {}), event)
         for event in reversed(work):
             name = event.get("file")
             if name and name not in files:
                 files.append(name)
         today = {e.get("session_id") for e in work if now - e["at"] <= _DAY and e.get("session_id")}
+        states = [(_expired(session, now), session) for session in sessions.values()]
+        waiting = [session["since"] for state, session in states if state == WAITING]
+        working = sum(state == WORKING for state, _ in states)
         projects.append(
             {
                 "name": path.name,
                 "path": root,
                 "exists": path.is_dir(),
-                # A session that has just ended is recent activity, not ongoing work.
-                "active": bool(last)
-                and last["event"] != "session-end"
-                and now - last["at"] <= ACTIVE_WITHIN,
+                "state": WAITING if waiting else (WORKING if working else QUIET),
+                "waiting_since": min(waiting) if waiting else None,
+                "sessions_waiting": len(waiting),
+                "sessions_working": working,
                 "last_activity": last["at"] if last else None,
                 "last_event": last["event"] if last else None,
                 "sessions_24h": len(today),
                 "files": files[:_RECENT_FILES],
                 "lessons": lessons.get(path.name, 0),
+                "stale_hooks": stale_hooks(path),
                 "memory": read_memory(path),
                 "_order": last["order"] if last else -1,
             }
@@ -155,7 +230,14 @@ def render(projects: list[dict], detail: bool = False, now: datetime | None = No
         return "Проектов нет. Подключи первый: grabli install <каталог>."
     blocks = []
     for project in projects:
-        state = "АКТИВЕН" if project["active"] else "тихо"
+        state = "тихо"
+        if project["state"] == WORKING:
+            state = "РАБОТАЕТ"
+        elif project["state"] == WAITING:
+            since = ago(project["waiting_since"], now).removesuffix(" назад")
+            state = f"ЖДЁТ ТЕБЯ, {since}"
+            if project["sessions_working"]:
+                state += f"; ещё работает: {project['sessions_working']}"
         if not project["exists"]:
             state = "каталог не найден"
         head = (
@@ -165,12 +247,19 @@ def render(projects: list[dict], detail: bool = False, now: datetime | None = No
         lines = [head]
         memory = project["memory"]
         if memory:
-            lines.append(f"  сейчас: {memory['now']}")
+            lines.append(f"  сейчас: {memory['now'] or 'раздел статуса пуст'}")
             for step in memory["next"]:
                 lines.append(f"  дальше: {step}")
             lines.append(f"  (MEMORY.md обновлён {ago(memory['updated'], now)})")
         else:
             lines.append("  сейчас: нет .claude/memory/MEMORY.md, статус взять неоткуда")
+        if project["stale_hooks"] is None and project["exists"]:
+            lines.append("  внимание: хуки grabli не найдены, состояние не обновляется")
+        elif project["stale_hooks"]:
+            lines.append(
+                f"  внимание: нет хуков {', '.join(project['stale_hooks'])}, состояние неточное;"
+                " выполни grabli install в проекте"
+            )
         files = project["files"] if detail else project["files"][:3]
         if files:
             lines.append(f"  правки: {', '.join(files)}")
@@ -187,7 +276,14 @@ def as_data(projects: list[dict]) -> list[dict]:
         memory = project["memory"]
         out.append(
             {
-                **{k: v for k, v in project.items() if k not in ("memory", "last_activity")},
+                **{
+                    k: v
+                    for k, v in project.items()
+                    if k not in ("memory", "last_activity", "waiting_since")
+                },
+                "waiting_since": project["waiting_since"].isoformat()
+                if project["waiting_since"]
+                else None,
                 "last_activity": project["last_activity"].isoformat()
                 if project["last_activity"]
                 else None,
@@ -207,7 +303,9 @@ def find(projects: list[dict], name: str) -> list[dict]:
     if "/" in wanted:
         full = str(Path(name).expanduser()).rstrip("/").lower()
         return [
-            p for p in projects if p["path"].lower() == full or p["path"].lower().endswith(wanted)
+            p
+            for p in projects
+            if p["path"].lower() == full or p["path"].lower().endswith("/" + wanted.lstrip("/"))
         ]
     exact = [p for p in projects if p["name"].lower() == wanted]
     return exact or [p for p in projects if wanted in p["name"].lower()]
